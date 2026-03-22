@@ -32,7 +32,7 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
             date_col = next((c for c in df_p.columns if 'date' in str(c).lower() or 'datum' in str(c).lower()), None)
             
         if date_col:
-            df_p['TempDate'] = pd.to_datetime(df_p[date_col], errors='coerce')
+            df_p['TempDate'] = pd.to_datetime(df_p[date_col], errors='coerce', dayfirst=True)
             df_p = df_p.dropna(subset=['TempDate'])
             df_p['MonthStr'] = df_p['TempDate'].dt.strftime('%Y-%m')
         else:
