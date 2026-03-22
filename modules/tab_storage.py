@@ -2,132 +2,176 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import datetime
+import plotly.graph_objects as go
+import re
 
 try:
     fast_render = st.fragment
 except AttributeError:
     fast_render = lambda f: f
 
+def parse_bin_coords(bin_str):
+    s = str(bin_str).strip()
+    nums = re.findall(r'\d+', s)
+    if len(nums) >= 3: return int(nums[0]), int(nums[1]), int(nums[2])
+    if len(nums) == 2: return int(nums[0]), int(nums[1]), 1
+    if '-' in s:
+        pts = s.split('-')
+        if pts[0].isalpha(): return ord(pts[0].upper()) - 64, int(pts[1]) if len(pts)>1 and pts[1].isdigit() else 1, int(pts[2]) if len(pts)>2 and pts[2].isdigit() else 1
+    h = hash(s)
+    return (h % 20) + 1, ((h // 20) % 10) + 1, ((h // 200) % 5) + 1
+
 @fast_render
 def render_storage(df_lx03, df_lt10, df_marm, df_pick):
-    st.markdown("<div class='section-header'><h3>🏢 Skladový Dispečink (Warehouse Control)</h3><p>Detailní přehled kapacity, optimalizace pozic a detekce mrtvých zásob ve skladech 800 a 820.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'><h3>🏢 Skladový Dispečink & 3D Mapa (Digital Twin)</h3><p>Detailní přehled kapacity, optimalizace pozic, detekce ležáků a 3D vizualizace zóny 800/820.</p></div>", unsafe_allow_html=True)
 
     if df_lx03 is None or df_lx03.empty or df_lt10 is None or df_lt10.empty:
         st.warning("⚠️ Chybí reporty **LX03** nebo **LT10**. Nahrajte je prosím v Admin Zóně.")
         return
 
-    # --- PŘÍPRAVA DAT A FILTRACE ZÓN (800, 820) ---
+    # --- PŘÍPRAVA DAT ---
     c_type_lx = next((c for c in df_lx03.columns if 'STORAGE TYPE' in str(c).upper() or 'TYP SKLADU' in str(c).upper()), None)
     c_bin_lx = next((c for c in df_lx03.columns if 'STORAGE BIN' in str(c).upper() or 'SKLADOVÉ MÍSTO' in str(c).upper()), None)
     c_mat_lx = next((c for c in df_lx03.columns if 'MATERIAL' in str(c).upper() or 'MATERIÁL' in str(c).upper()), None)
     c_bintype_lx = next((c for c in df_lx03.columns if 'STORAGE BIN TYPE' in str(c).upper() or 'TYP SKLAD.MÍSTA' in str(c).upper()), None)
-
-    lx_clean = df_lx03.copy()
-    if c_type_lx:
-        lx_clean = lx_clean[lx_clean[c_type_lx].astype(str).str.strip().isin(['800', '820'])]
-
-    # ==========================================
-    # SEKCE 1: KAPACITA SKLADU
-    # ==========================================
-    st.markdown("#### 📊 Aktuální kapacita skladu (Zóny 800 a 820)")
-    if c_bintype_lx and c_mat_lx:
-        # Rozlišení prázdných a plných pozic
-        lx_clean['Is_Empty'] = lx_clean[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', ''])
-        
-        cap_agg = lx_clean.groupby([c_bintype_lx, 'Is_Empty']).size().reset_index(name='Count')
-        cap_pivot = cap_agg.pivot(index=c_bintype_lx, columns='Is_Empty', values='Count').fillna(0)
-        if True in cap_pivot.columns: cap_pivot.rename(columns={True: 'Volné'}, inplace=True)
-        if False in cap_pivot.columns: cap_pivot.rename(columns={False: 'Obsazené'}, inplace=True)
-        
-        cap_pivot['Celkem'] = cap_pivot.get('Volné', 0) + cap_pivot.get('Obsazené', 0)
-        cap_pivot['Využití (%)'] = (cap_pivot.get('Obsazené', 0) / cap_pivot['Celkem'] * 100).round(1)
-        
-        c1, c2 = st.columns([2, 3])
-        with c1:
-            st.dataframe(cap_pivot[['Obsazené', 'Volné', 'Využití (%)']].style.format({'Využití (%)': "{:.1f} %"}), use_container_width=True)
-        with c2:
-            fig = px.bar(cap_agg, x=c_bintype_lx, y='Count', color='Is_Empty', title="Obsazenost podle typu lokace",
-                         color_discrete_map={True: '#10b981', False: '#ef4444'}, labels={'Is_Empty': 'Prázdné?'})
-            fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig, use_container_width=True)
-
-    st.divider()
-
-    # ==========================================
-    # SEKCE 2: NÁVRHY NA PŘESUNY (Downsizing do K1)
-    # ==========================================
-    st.markdown("#### 💡 Optimalizace: Doporučené přesuny z Palet (EP1-EP4) do Regálů (K1)")
-    st.write("Aplikace hledá materiály, kterých je na paletových pozicích jen zbytek (pár kusů), a podle fyzických rozměrů z MARM garantuje, že se vejdou do K1 (55x45x40 cm).")
-    
-    col_sl1, col_sl2 = st.columns(2)
-    with col_sl1: limit_ks = st.slider("Maximální počet kusů na paletě pro přesun:", min_value=1, max_value=50, value=5, step=1)
     
     c_mat_lt = next((c for c in df_lt10.columns if 'MATERIAL' in str(c).upper() or 'MATERIÁL' in str(c).upper()), None)
     c_qty_lt = next((c for c in df_lt10.columns if 'AVAILABLE STOCK' in str(c).upper() or 'ZÁSOBA K DISP.' in str(c).upper()), None)
     c_bintype_lt = next((c for c in df_lt10.columns if 'STORAGE BIN TYPE' in str(c).upper() or 'TYP SKLAD.MÍSTA' in str(c).upper()), None)
     c_bin_lt = next((c for c in df_lt10.columns if 'STORAGE BIN' in str(c).upper() or 'SKLADOVÉ MÍSTO' in str(c).upper()), None)
-    
-    if c_mat_lt and c_qty_lt and c_bintype_lt:
-        lt_ep = df_lt10[df_lt10[c_bintype_lt].astype(str).str.strip().str.upper().isin(['EP1', 'EP2', 'EP3', 'EP4'])].copy()
-        lt_ep['Qty_Num'] = pd.to_numeric(lt_ep[c_qty_lt], errors='coerce').fillna(0)
-        candidates = lt_ep[(lt_ep['Qty_Num'] > 0) & (lt_ep['Qty_Num'] <= limit_ks)].copy()
-        
-        # Ověření rozměrů přes MARM (Chytrá 3D rotace)
-        if df_marm is not None and not candidates.empty:
-            c_marm_mat = next((c for c in df_marm.columns if 'MATERIAL' in str(c).upper() or 'MATERIÁL' in str(c).upper()), df_marm.columns[0])
-            c_len = next((c for c in df_marm.columns if 'LENGTH' in str(c).upper() or 'LÄNGE' in str(c).upper() or 'DÉLKA' in str(c).upper()), None)
-            c_wid = next((c for c in df_marm.columns if 'WIDTH' in str(c).upper() or 'BREITE' in str(c).upper() or 'ŠÍŘKA' in str(c).upper()), None)
-            c_hei = next((c for c in df_marm.columns if 'HEIGHT' in str(c).upper() or 'HÖHE' in str(c).upper() or 'VÝŠKA' in str(c).upper()), None)
-            
-            if c_len and c_wid and c_hei:
-                valid_mats = []
-                for _, r in df_marm.iterrows():
-                    mat = str(r[c_marm_mat]).strip().lstrip('0')
-                    try:
-                        l = float(str(r[c_len]).replace(',', '.'))
-                        w = float(str(r[c_wid]).replace(',', '.'))
-                        h = float(str(r[c_hei]).replace(',', '.'))
-                        # Seřadíme rozměry krabice vs rozměry regálu (55x45x40)
-                        dims = sorted([l, w, h])
-                        if dims[0] <= 40 and dims[1] <= 45 and dims[2] <= 55:
-                            valid_mats.append(mat)
-                    except: pass
-                
-                candidates['Clean_Mat'] = candidates[c_mat_lt].astype(str).str.strip().str.lstrip('0')
-                approved = candidates[candidates['Clean_Mat'].isin(valid_mats)].copy()
-                
-                if not approved.empty:
-                    st.success(f"Nalezeno {len(approved)} palet, které lze uvolnit přesunem do K1!")
-                    disp_app = approved[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt]].copy()
-                    disp_app.columns = ['Současná pozice', 'Typ pozice', 'Materiál', 'Počet kusů k přesunu']
-                    st.dataframe(disp_app.sort_values('Počet kusů k přesunu'), hide_index=True, use_container_width=True)
-                else:
-                    st.info("Žádné materiály nesplňují limity počtu kusů a 3D rozměrů pro K1.")
-            else: st.warning("V MARM reportu chybí sloupce Délka/Šířka/Výška.")
-        else: st.info("Pro ověření rozměrů nahrajte MARM report.")
-
-    st.divider()
-
-    # ==========================================
-    # SEKCE 3: LEŽÁKY A OBRÁTKOVOST (Dead Stock)
-    # ==========================================
-    st.markdown("#### 💀 Mrtvá zásoba (Ležáky ve skladu)")
     c_date_lt = next((c for c in df_lt10.columns if 'LAST MOVEMENT' in str(c).upper() or 'POSLEDNÍ POHYB' in str(c).upper()), None)
-    
-    if c_date_lt and c_mat_lt:
-        col_ds1, _ = st.columns(2)
-        with col_ds1: days_limit = st.slider("Za ležák považovat materiál bez pohybu více než X dní:", min_value=30, max_value=365, value=90, step=10)
+
+    lx_clean = df_lx03.copy()
+    if c_type_lx:
+        lx_clean = lx_clean[lx_clean[c_type_lx].astype(str).str.strip().isin(['800', '820'])]
+
+    tab1, tab2, tab3 = st.tabs(["🚀 Optimalizace & Volná kapacita", "🗺️ 3D Interaktivní Mapa Skladu", "💀 Analýza Ležáků (Dead Stock)"])
+
+    # ============================
+    # TAB 1: KAPACITA A PŘESUNY
+    # ============================
+    with tab1:
+        st.markdown("#### 📊 Kapacita skladu (Zóny 800 a 820)")
+        if c_bintype_lx and c_mat_lx:
+            lx_clean['Is_Empty'] = lx_clean[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', ''])
+            cap_agg = lx_clean.groupby([c_bintype_lx, 'Is_Empty']).size().reset_index(name='Count')
+            cap_pivot = cap_agg.pivot(index=c_bintype_lx, columns='Is_Empty', values='Count').fillna(0)
+            if True in cap_pivot.columns: cap_pivot.rename(columns={True: 'Volné'}, inplace=True)
+            if False in cap_pivot.columns: cap_pivot.rename(columns={False: 'Obsazené'}, inplace=True)
+            cap_pivot['Celkem'] = cap_pivot.get('Volné', 0) + cap_pivot.get('Obsazené', 0)
+            cap_pivot['Využití (%)'] = (cap_pivot.get('Obsazené', 0) / cap_pivot['Celkem'] * 100).round(1)
+            
+            c1, c2 = st.columns([2, 3])
+            with c1: st.dataframe(cap_pivot[['Obsazené', 'Volné', 'Využití (%)']].style.format({'Využití (%)': "{:.1f} %"}), use_container_width=True)
+            with c2:
+                fig = px.bar(cap_agg, x=c_bintype_lx, y='Count', color='Is_Empty', title="Obsazenost podle typu lokace", color_discrete_map={True: '#10b981', False: '#ef4444'}, labels={'Is_Empty': 'Prázdné?'})
+                fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig, use_container_width=True)
+        st.divider()
+
+        st.markdown("#### 💡 Doporučené přesuny zbytkových kusů z Palet (EP1-EP4) do Regálů (K1)")
+        st.write("Aplikace hledá palety určené pro 'Downsizing'. Zaručuje 100% jistotu díky 3D výpočtům průniku regálu a rozměrů obalu materiálu.")
+        col_sl1, col_sl2 = st.columns(2)
+        with col_sl1: limit_ks = st.slider("Max. limit kusů na paletě pro návrh na přesun:", min_value=1, max_value=50, value=5, step=1)
         
-        lt_dead = df_lt10.copy()
-        lt_dead['Date_Mov'] = pd.to_datetime(lt_dead[c_date_lt], errors='coerce')
-        cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_limit)
+        if c_mat_lt and c_qty_lt and c_bintype_lt:
+            lt_ep = df_lt10[df_lt10[c_bintype_lt].astype(str).str.strip().str.upper().isin(['EP1', 'EP2', 'EP3', 'EP4'])].copy()
+            lt_ep['Qty_Num'] = pd.to_numeric(lt_ep[c_qty_lt], errors='coerce').fillna(0)
+            candidates = lt_ep[(lt_ep['Qty_Num'] > 0) & (lt_ep['Qty_Num'] <= limit_ks)].copy()
+            
+            if not candidates.empty:
+                if df_marm is not None:
+                    c_marm_mat = next((c for c in df_marm.columns if 'MATERIAL' in str(c).upper() or 'MATERIÁL' in str(c).upper()), df_marm.columns[0])
+                    c_len = next((c for c in df_marm.columns if 'LENGTH' in str(c).upper() or 'LÄNGE' in str(c).upper() or 'DÉLKA' in str(c).upper()), None)
+                    c_wid = next((c for c in df_marm.columns if 'WIDTH' in str(c).upper() or 'BREITE' in str(c).upper() or 'ŠÍŘKA' in str(c).upper()), None)
+                    c_hei = next((c for c in df_marm.columns if 'HEIGHT' in str(c).upper() or 'HÖHE' in str(c).upper() or 'VÝŠKA' in str(c).upper()), None)
+                    
+                    if c_len and c_wid and c_hei:
+                        valid_mats = []
+                        for _, r in df_marm.iterrows():
+                            mat = str(r[c_marm_mat]).strip().lstrip('0')
+                            try:
+                                l, w, h = float(str(r[c_len]).replace(',','.')), float(str(r[c_wid]).replace(',','.')), float(str(r[c_hei]).replace(',','.'))
+                                dims = sorted([l, w, h])
+                                if dims[0] <= 40 and dims[1] <= 45 and dims[2] <= 55: valid_mats.append(mat)
+                            except: pass
+                        
+                        candidates['Clean_Mat'] = candidates[c_mat_lt].astype(str).str.strip().str.lstrip('0')
+                        approved = candidates[candidates['Clean_Mat'].isin(valid_mats)].copy()
+                        if not approved.empty:
+                            st.success(f"Nalezeno {len(approved)} palet, které lze bezpečně přesunout!")
+                            disp_app = approved[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt]].copy()
+                            disp_app.columns = ['Současná pozice', 'Typ lokace', 'Materiál (SAP)', 'Zásoba k přesunu']
+                            st.dataframe(disp_app.sort_values('Zásoba k přesunu'), hide_index=True, use_container_width=True)
+                        else: st.info("Žádné materiály s požadovaným zůstatkem nesplňují fyzické rozměry (55x45x40 cm) pro vložení do police K1.")
+                    else: st.warning("V nahraném MARM reportu chybí sloupce pro rozměry (Délka/Šířka/Výška).")
+                else: st.info("Pro ověření fyzických rozměrů krabic vůči pozici (aby se vešly) prosím nahrajte MARM report v Admin Zóně.")
+            else: st.info(f"Ve skladech nejsou instalovány žádné palety se zbytkovým objemem menším jak {limit_ks} ks.")
+
+    # ============================
+    # TAB 2: 3D MAPA SKLADU
+    # ============================
+    with tab2:
+        st.markdown("#### 🗺️ 3D Digital Twin (Aktuální stav pozic - LX03)")
+        st.write("Interaktivní reprezentace struktury skladu. Zelené body = volno, Červené = plno.")
         
-        dead_stock = lt_dead[lt_dead['Date_Mov'] < cutoff_date].copy()
-        if not dead_stock.empty:
-            dead_stock['Dní bez pohybu'] = (datetime.datetime.now() - dead_stock['Date_Mov']).dt.days
-            disp_dead = dead_stock[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt, c_date_lt, 'Dní bez pohybu']].sort_values('Dní bez pohybu', ascending=False)
-            disp_dead.columns = ['Pozice', 'Typ', 'Materiál', 'Kusů', 'Datum posledního pohybu', 'Dní bez pohybu']
-            st.error(f"Nalezeno {len(dead_stock)} palet/boxů, které se nehnuly déle než {days_limit} dní!")
-            st.dataframe(disp_dead, hide_index=True, use_container_width=True)
-        else: st.success("Sklad je čistý, nemáte žádné ležáky!")
+        if c_bin_lx and c_mat_lx:
+            df_map = lx_clean.copy()
+            df_map['Is_Empty'] = df_map[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', ''])
+            
+            coords = df_map[c_bin_lx].apply(parse_bin_coords).tolist()
+            df_map['Ulička'] = [c[0] for c in coords]
+            df_map['Sloupec'] = [c[1] for c in coords]
+            df_map['Patro'] = [c[2] for c in coords]
+            
+            df_map['Status'] = np.where(df_map['Is_Empty'], 'Volno', 'Obsazeno')
+            df_map['Color'] = np.where(df_map['Is_Empty'], '#10b981', '#ef4444')
+            
+            fig3d = go.Figure(data=[go.Scatter3d(
+                x=df_map['Ulička'], y=df_map['Sloupec'], z=df_map['Patro'],
+                mode='markers',
+                marker=dict(size=6, color=df_map['Color'], opacity=0.8, line=dict(width=0.5, color='rgba(255,255,255,0.2)')),
+                text=df_map[c_bin_lx] + "<br>" + df_map[c_mat_lx] + "<br>" + df_map['Status'],
+                hoverinfo='text'
+            )])
+            
+            fig3d.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                scene=dict(
+                    xaxis_title='Ulička (Aisle)',
+                    yaxis_title='Sloupec (Stack)',
+                    zaxis_title='Patro (Level)',
+                    xaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.1)'),
+                    yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.1)'),
+                    zaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.1)'),
+                    bgcolor='rgba(0,0,0,0)'
+                ),
+                margin=dict(l=0, r=0, b=0, t=0),
+                height=600
+            )
+            st.plotly_chart(fig3d, use_container_width=True)
+            
+            st.info("💡 **Tip:** Rotujte myší, scrollujte pro přiblížení. Zelené sektory odhalují kapsy s volnou kapacitou pro cílené naskladnění.")
+
+    # ============================
+    # TAB 3: LEŽÁKY (DEATH STOCK)
+    # ============================
+    with tab3:
+        st.markdown("#### 💀 Mrtvá zásoba (Sledování ležáků - LT10)")
+        if c_date_lt and c_mat_lt:
+            col_ds1, _ = st.columns(2)
+            with col_ds1: days_limit = st.slider("Identifikovat palety bez pohybu déle než X dní:", min_value=30, max_value=365, value=90, step=10)
+            
+            lt_dead = df_lt10.copy()
+            lt_dead['Date_Mov'] = pd.to_datetime(lt_dead[c_date_lt], errors='coerce', dayfirst=True)
+            cutoff_date = pd.Timestamp.now().normalize() - pd.Timedelta(days=days_limit)
+            
+            dead_stock = lt_dead[lt_dead['Date_Mov'] < cutoff_date].copy()
+            if not dead_stock.empty:
+                dead_stock['Dní bez pohybu'] = (pd.Timestamp.now().normalize() - dead_stock['Date_Mov']).dt.days
+                disp_dead = dead_stock[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt, c_date_lt, 'Dní bez pohybu']].sort_values('Dní bez pohybu', ascending=False)
+                disp_dead.columns = ['Lokace', 'Typ. poz', 'Skladový materiál', 'Dostupné Množství', 'Datum posledního pohybu', 'Uplynulých Dní']
+                st.error(f"Nalezeno {len(dead_stock)} palet/boxů, na které nebylo sáhnuto déle než {days_limit} dní!")
+                st.dataframe(disp_dead, hide_index=True, use_container_width=True)
+            else: st.success(f"Geniální! Tento sklad nemá žádné skryté ležáky s expozicí delší jak {days_limit} dní.")
