@@ -86,11 +86,11 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
         c_del_cats = next((c for c in df_cats.columns if str(c).strip().lower() in ['lieferung', 'delivery', 'zakázka', 'dodávka', 'zakazka', 'dodavka']), df_cats.columns[0])
         c_kat = next((c for c in df_cats.columns if 'kategorie' in str(c).lower() or 'category' in str(c).lower()), None)
         if c_del_cats and c_kat:
-            idx_del = df_cats.columns.get_loc(c_del_cats)
-            idx_kat = df_cats.columns.get_loc(c_kat)
-            for r in df_cats.itertuples(index=False):
-                d = safe_del(r[idx_del])
-                cat_val = str(r[idx_kat]).strip().upper()
+            idx_del = next(i for i, c in enumerate(df_cats.columns) if c == c_del_cats)
+            idx_kat = next(i for i, c in enumerate(df_cats.columns) if c == c_kat)
+            for row in df_cats.to_numpy():
+                d = safe_del(row[idx_del])
+                cat_val = str(row[idx_kat]).strip().upper()
                 if cat_val in ['N', 'E', 'O', 'OE']:
                     del_base_map[d] = cat_val
 
@@ -100,10 +100,10 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
         c_lief = next((c for c in df_likp.columns if "delivery" in str(c).lower() or "lieferung" in str(c).lower() or "dodávka" in str(c).lower() or "zakázka" in str(c).lower()), df_likp.columns[0])
         c_vs = next((c for c in df_likp.columns if "shipping point" in str(c).lower() or "versandstelle" in str(c).lower() or "receiving pt" in str(c).lower() or "místo" in str(c).lower()), None)
         if c_vs:
-            idx_lief = df_likp.columns.get_loc(c_lief)
-            idx_vs = df_likp.columns.get_loc(c_vs)
-            for r in df_likp.itertuples(index=False):
-                del_vs_map[safe_del(r[idx_lief])] = str(r[idx_vs]).strip().upper()
+            idx_lief = next(i for i, c in enumerate(df_likp.columns) if c == c_lief)
+            idx_vs = next(i for i, c in enumerate(df_likp.columns) if c == c_vs)
+            for row in df_likp.to_numpy():
+                del_vs_map[safe_del(row[idx_lief])] = str(row[idx_vs]).strip().upper()
 
     kep_carriers = set()
     df_kep = load_from_db('aus_sdshp_am2')
@@ -111,11 +111,11 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
         c_sped = next((c for c in df_kep.columns if "Spediteur" in str(c)), df_kep.columns[0])
         c_kep = next((c for c in df_kep.columns if "KEP" in str(c)), None)
         if c_kep:
-            idx_sped = df_kep.columns.get_loc(c_sped)
-            idx_kep = df_kep.columns.get_loc(c_kep)
-            for r in df_kep.itertuples(index=False):
-                if str(r[idx_kep]).strip().upper() == 'X':
-                    kep_carriers.add(str(r[idx_sped]).strip().lstrip('0'))
+            idx_sped = next(i for i, c in enumerate(df_kep.columns) if c == c_sped)
+            idx_kep = next(i for i, c in enumerate(df_kep.columns) if c == c_kep)
+            for row in df_kep.to_numpy():
+                if str(row[idx_kep]).strip().upper() == 'X':
+                    kep_carriers.add(str(row[idx_sped]).strip().lstrip('0'))
 
     del_is_kep = {}
     df_vbpa = load_from_db('aus_vbpa')
@@ -126,20 +126,26 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
         c_deb = next((c for c in df_vbpa.columns if "Debitor" in str(c) or "Customer" in str(c)), None)
         
         if c_role and (c_kred or c_deb):
-            idx_beleg = df_vbpa.columns.get_loc(c_beleg)
-            idx_role = df_vbpa.columns.get_loc(c_role)
-            idx_kred = df_vbpa.columns.get_loc(c_kred) if c_kred else -1
-            idx_deb = df_vbpa.columns.get_loc(c_deb) if c_deb else -1
-            for r in df_vbpa.itertuples(index=False):
-                if str(r[idx_role]).strip().upper() in ['SP', 'CR']:
-                    val_kred = str(r[idx_kred]) if idx_kred >= 0 else ''
-                    val_deb = str(r[idx_deb]) if idx_deb >= 0 else ''
+            idx_beleg = next((i for i, c in enumerate(df_vbpa.columns) if c == c_beleg), -1)
+            idx_role = next((i for i, c in enumerate(df_vbpa.columns) if c == c_role), -1)
+            idx_kred = next((i for i, c in enumerate(df_vbpa.columns) if c == c_kred), -1) if c_kred else -1
+            idx_deb = next((i for i, c in enumerate(df_vbpa.columns) if c == c_deb), -1) if c_deb else -1
+            for row in df_vbpa.to_numpy():
+                if str(row[idx_role]).strip().upper() in ['SP', 'CR']:
+                    val_kred = str(row[idx_kred]) if idx_kred >= 0 else ''
+                    val_deb = str(row[idx_deb]) if idx_deb >= 0 else ''
                     sped = (val_kred if val_kred else val_deb).strip().lstrip('0')
                     if sped in kep_carriers:
-                        del_is_kep[safe_del(r[idx_beleg])] = True
+                        del_is_kep[safe_del(row[idx_beleg])] = True
 
     all_active_dels = vekp_filtered['Clean_Del'].unique()
     
+    # 💥 ODSTRANĚNÍ NEKONEČNÉHO O(N*M) ÚZKÉHO HRDLA
+    df_pick_queues_cache = {}
+    if not df_pick_billing.empty:
+        for d_pick, grp_pick in df_pick_billing.groupby('Clean_Del'):
+            df_pick_queues_cache[d_pick] = set(grp_pick['Queue'].dropna().astype(str).str.upper().unique())
+            
     for d in all_active_dels:
         if d not in del_base_map:
             vs = del_vs_map.get(d, "")
@@ -156,9 +162,8 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
                 if base == 'N': base = 'E'
                 if base == 'O': base = 'OE'
             elif not df_pick_billing.empty:
-                grp = df_pick_billing[df_pick_billing['Clean_Del'] == d]
-                if not grp.empty:
-                    all_queues = set(grp['Queue'].dropna().astype(str).str.upper().unique())
+                all_queues = df_pick_queues_cache.get(d, set())
+                if all_queues:
                     has_pallet = any(q in ['PI_PL', 'PI_PL_OE', 'FU', 'FU_O', 'FUOE', 'PI_PL_FU'] for q in all_queues)
                     has_parcel = 'PI_PA' in all_queues or 'PI_PA_OE' in all_queues
                     if has_parcel and not has_pallet:
@@ -184,11 +189,13 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
         if v_mat_cols:
             vepo_clean['Uni_Mat'] = vepo_clean[v_mat_cols].bfill(axis=1).iloc[:, 0]
             
-            idx_hu = vepo_clean.columns.get_loc('Uni_HU')
-            idx_mat = vepo_clean.columns.get_loc('Uni_Mat')
-            for r in vepo_clean.dropna(subset=['Uni_HU', 'Uni_Mat']).itertuples(index=False):
-                h = safe_hu(r[idx_hu])
-                m = str(r[idx_mat]).strip()
+            idx_hu = next((i for i, c in enumerate(vepo_clean.columns) if c == 'Uni_HU'), -1)
+            idx_mat = next((i for i, c in enumerate(vepo_clean.columns) if c == 'Uni_Mat'), -1)
+            
+            vepo_dropna = vepo_clean.dropna(subset=['Uni_HU', 'Uni_Mat'])
+            for row in vepo_dropna.to_numpy():
+                h = safe_hu(row[idx_hu])
+                m = str(row[idx_mat]).strip()
                 if h not in vepo_mats: vepo_mats[h] = set()
                 vepo_mats[h].add(m)
 
@@ -221,16 +228,16 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
 
     root_df = vekp_filtered[vekp_filtered['Clean_Parent'] == '']
     if not root_df.empty:
-        idx_ext = root_df.columns.get_loc('Clean_HU_Ext')
-        idx_int = root_df.columns.get_loc('Clean_HU_Int')
+        idx_ext = next((i for i, c in enumerate(root_df.columns) if c == 'Clean_HU_Ext'), -1)
+        idx_int = next((i for i, c in enumerate(root_df.columns) if c == 'Clean_HU_Int'), -1)
 
     for d, grp in root_df.groupby('Clean_Del'):
         base = del_base_map.get(d, "N")
         valid_picked_mats = picked_mats_by_del.get(d, set())
 
-        for r in grp.itertuples(index=False):
-            ext_hu = r[idx_ext]
-            root_hu = r[idx_int]
+        for row in grp.to_numpy():
+            ext_hu = row[idx_ext]
+            root_hu = row[idx_int]
 
             leaves = get_leaves(root_hu)
 
