@@ -194,48 +194,48 @@ def detect_vollpalettes(df_pick, df_vekp, df_vepo):
     c_gen = next((c for c in df_vekp.columns if "Generated delivery" in str(c) or "generierte" in str(c).lower()), None)
     c_pm = next((c for c in df_vekp.columns if "Packmittel" in str(c) or "Packaging" in str(c) or "Pack. mat" in str(c)), None)
     
-    # SUPER RYCHLÁ VERZE BEZ iterrows()
-    c_gen_idx = df_vekp.columns.get_loc(c_gen) if c_gen else -1
-    parent_idx = df_vekp.columns.get_loc(parent_col) if parent_col else -1
-    pm_idx = df_vekp.columns.get_loc(c_pm) if c_pm else -1
-    vekp_ext_idx = df_vekp.columns.get_loc(vekp_ext_col)
-    vekp_hu_idx = df_vekp.columns.get_loc(vekp_hu_col)
+    # SUPER RYCHLÁ VERZE POMOCÍ TO_NUMPY
+    c_gen_idx = next((i for i, c in enumerate(df_vekp.columns) if c == c_gen), -1) if c_gen else -1
+    parent_idx = next((i for i, c in enumerate(df_vekp.columns) if c == parent_col), -1) if parent_col else -1
+    pm_idx = next((i for i, c in enumerate(df_vekp.columns) if c == c_pm), -1) if c_pm else -1
+    vekp_ext_idx = next((i for i, c in enumerate(df_vekp.columns) if c == vekp_ext_col), -1)
+    vekp_hu_idx = next((i for i, c in enumerate(df_vekp.columns) if c == vekp_hu_col), -1)
     
     valid_roots = {}
-    for r in df_vekp.itertuples(index=False):
-        deliv = safe_del(r[c_gen_idx]) if c_gen_idx >= 0 else ""
-        parent = safe_hu(r[parent_idx]) if parent_idx >= 0 else ""
-        pm = str(r[pm_idx]).upper().strip() if pm_idx >= 0 else ""
+    for row in df_vekp.to_numpy():
+        deliv = safe_del(row[c_gen_idx]) if c_gen_idx >= 0 else ""
+        parent = safe_hu(row[parent_idx]) if parent_idx >= 0 else ""
+        pm = str(row[pm_idx]).upper().strip() if pm_idx >= 0 else ""
         
         if parent == "" and not is_box(pm):
-            ext_hu = safe_hu(r[vekp_ext_idx])
-            int_hu = safe_hu(r[vekp_hu_idx])
+            ext_hu = safe_hu(row[vekp_ext_idx]) if vekp_ext_idx >= 0 else ""
+            int_hu = safe_hu(row[vekp_hu_idx]) if vekp_hu_idx >= 0 else ""
             if int_hu in valid_vepo_hus:
                 if ext_hu: valid_roots[(deliv, ext_hu)] = int_hu
                 if int_hu: valid_roots[(deliv, int_hu)] = int_hu
                 
     c_su = 'Storage Unit Type' if 'Storage Unit Type' in df_pick.columns else ('Type' if 'Type' in df_pick.columns else None)
     
-    # Předzpracujeme indexy pro druhou smyčku
-    col_su_idx = df_pick.columns.get_loc(c_su) if c_su else -1
-    col_rem_idx = df_pick.columns.get_loc('Removal of total SU') if 'Removal of total SU' in df_pick.columns else -1
-    col_q_idx = df_pick.columns.get_loc('Queue') if 'Queue' in df_pick.columns else -1
-    col_ssu_idx = df_pick.columns.get_loc('Source storage unit') if 'Source storage unit' in df_pick.columns else -1
-    col_hu_idx = df_pick.columns.get_loc('Handling Unit') if 'Handling Unit' in df_pick.columns else -1
-    col_del_idx = df_pick.columns.get_loc('Delivery') if 'Delivery' in df_pick.columns else -1
+    # Předzpracujeme indexy pro druhou smyčku pomocí enumerate
+    col_su_idx = next((i for i, c in enumerate(df_pick.columns) if c == c_su), -1) if c_su else -1
+    col_rem_idx = next((i for i, c in enumerate(df_pick.columns) if c == 'Removal of total SU'), -1)
+    col_q_idx = next((i for i, c in enumerate(df_pick.columns) if c == 'Queue'), -1)
+    col_ssu_idx = next((i for i, c in enumerate(df_pick.columns) if c == 'Source storage unit'), -1)
+    col_hu_idx = next((i for i, c in enumerate(df_pick.columns) if c == 'Handling Unit'), -1)
+    col_del_idx = next((i for i, c in enumerate(df_pick.columns) if c == 'Delivery'), -1)
     
-    for r in df_pick.itertuples(index=False):
-        rem = str(r[col_rem_idx]).strip().upper() if col_rem_idx >= 0 else ''
+    for row in df_pick.to_numpy():
+        rem = str(row[col_rem_idx]).strip().upper() if col_rem_idx >= 0 else ''
         if rem != 'X': continue 
         
-        su_type = str(r[col_su_idx]) if col_su_idx >= 0 else ''
+        su_type = str(row[col_su_idx]) if col_su_idx >= 0 else ''
         if is_box(su_type): continue 
         
-        queue_val = str(r[col_q_idx]).upper() if col_q_idx >= 0 else ''
+        queue_val = str(row[col_q_idx]).upper() if col_q_idx >= 0 else ''
         if 'PI_PA' in queue_val: continue 
         
-        ssu = safe_hu(r[col_ssu_idx]) if col_ssu_idx >= 0 else ''
-        hu = safe_hu(r[col_hu_idx]) if col_hu_idx >= 0 else ''
+        ssu = safe_hu(row[col_ssu_idx]) if col_ssu_idx >= 0 else ''
+        hu = safe_hu(row[col_hu_idx]) if col_hu_idx >= 0 else ''
         
         pick_hu = ""
         if ssu and hu:
@@ -245,7 +245,7 @@ def detect_vollpalettes(df_pick, df_vekp, df_vepo):
         elif hu: pick_hu = hu
         else: continue
         
-        deliv = safe_del(r[col_del_idx]) if col_del_idx >= 0 else ''
+        deliv = safe_del(row[col_del_idx]) if col_del_idx >= 0 else ''
         
         if (deliv, pick_hu) in valid_roots:
             int_match = valid_roots[(deliv, pick_hu)]
