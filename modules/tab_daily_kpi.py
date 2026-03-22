@@ -85,10 +85,12 @@ def render_daily_kpi(df_pick, raw_vekp):
     pick_daily = pd.DataFrame()
     if df_pick is not None and not df_pick.empty:
         df_p = df_pick.copy()
-        date_col = 'Confirmation date' if 'Confirmation date' in df_p.columns else 'Date'
-        time_col = 'Confirmation time' if 'Confirmation time' in df_p.columns else 'Time'
+        date_col = next((c for c in df_p.columns if 'confirm' in str(c).lower() or 'bestät' in str(c).lower() or 'potvrz' in str(c).lower() and ('date' in str(c).lower() or 'datum' in str(c).lower())), None)
+        if not date_col:
+            date_col = next((c for c in df_p.columns if 'date' in str(c).lower() or 'datum' in str(c).lower()), None)
+        time_col = next((c for c in df_p.columns if 'time' in str(c).lower() or 'zeit' in str(c).lower() or 'čas' in str(c).lower() or 'cas' in str(c).lower()), None)
         
-        if date_col in df_p.columns and time_col in df_p.columns:
+        if date_col and time_col:
             df_p['TempDate'] = pd.to_datetime(df_p[date_col], errors='coerce').dt.strftime('%Y-%m-%d')
             pick_daily = df_p[df_p['TempDate'] == sel_date_str].copy()
             if not pick_daily.empty:
@@ -117,8 +119,8 @@ def render_daily_kpi(df_pick, raw_vekp):
         if df_hu_details is not None and not df_hu_details.empty:
             df_v = raw_vekp.copy()
             c_hu_int = next((c for c in df_v.columns if "Internal HU" in str(c) or "HU-Nummer intern" in str(c)), df_v.columns[0])
-            date_col_v = next((c for c in df_v.columns if 'CREATED ON' in str(c).upper() or 'ERFASST AM' in str(c).upper()), None)
-            time_col_v = next((c for c in df_v.columns if 'TIME' in str(c).upper() or 'UHRZEIT' in str(c).upper()), None)
+            date_col_v = next((c for c in df_v.columns if 'CREATED ON' in str(c).upper() or 'ERFASST AM' in str(c).upper() or 'VYTVOŘENO' in str(c).upper()), None)
+            time_col_v = next((c for c in df_v.columns if 'TIME' in str(c).upper() or 'UHRZEIT' in str(c).upper() or 'ČAS' in str(c).upper()), None)
             
             if date_col_v and time_col_v:
                 # Očistíme klíče pro přesné spárování
