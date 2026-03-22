@@ -27,10 +27,17 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
     df_p = pd.DataFrame()
     if df_pick is not None and not df_pick.empty:
         df_p = df_pick.copy()
-        date_col = 'Confirmation date' if 'Confirmation date' in df_p.columns else 'Date'
-        df_p['TempDate'] = pd.to_datetime(df_p[date_col], errors='coerce')
-        df_p = df_p.dropna(subset=['TempDate'])
-        df_p['MonthStr'] = df_p['TempDate'].dt.strftime('%Y-%m')
+        date_col = next((c for c in df_p.columns if 'confirm' in str(c).lower() or 'bestät' in str(c).lower() or 'potvrz' in str(c).lower()), None)
+        if not date_col:
+            date_col = next((c for c in df_p.columns if 'date' in str(c).lower() or 'datum' in str(c).lower()), None)
+            
+        if date_col:
+            df_p['TempDate'] = pd.to_datetime(df_p[date_col], errors='coerce')
+            df_p = df_p.dropna(subset=['TempDate'])
+            df_p['MonthStr'] = df_p['TempDate'].dt.strftime('%Y-%m')
+        else:
+            df_p['MonthStr'] = 'Unknown'
+            
         df_p['Queue'] = df_p.get('Queue', _t('Neznámá fronta', 'Unknown Queue')).fillna(_t('Neznámá fronta', 'Unknown Queue'))
 
     # --- PACK DATA ---
@@ -50,9 +57,9 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
         
         vk_hu_col = next((c for c in df_vk.columns if "Internal HU" in str(c) or "HU-Nummer intern" in str(c)), None)
         vp_hu_col = next((c for c in df_vp.columns if "Internal HU" in str(c) or "HU-Nummer intern" in str(c)), None)
-        vp_qty_col = next((c for c in df_vp.columns if "Packed quantity" in str(c) or "VEMNG" in str(c)), None)
+        vp_qty_col = next((c for c in df_vp.columns if "Packed quantity" in str(c) or "VEMNG" in str(c) or "Packmenge" in str(c) or "Množství" in str(c) or "BalMnožst" in str(c)), None)
         
-        date_col_v = next((c for c in df_vk.columns if 'CREATED ON' in str(c).upper() or 'ERFASST AM' in str(c).upper()), None)
+        date_col_v = next((c for c in df_vk.columns if 'CREATED ON' in str(c).upper() or 'ERFASST AM' in str(c).upper() or 'VYTVOŘENO' in str(c).upper()), None)
         
         if vk_hu_col and vp_hu_col and date_col_v and vp_qty_col:
             df_vk['Clean_HU'] = df_vk[vk_hu_col].apply(safe_hu)
