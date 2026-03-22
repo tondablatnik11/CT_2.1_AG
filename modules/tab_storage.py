@@ -17,7 +17,8 @@ def parse_bin_coords(bin_str):
     if len(nums) == 2: return int(nums[0]), int(nums[1]), 1
     if '-' in s:
         pts = s.split('-')
-        if pts[0].isalpha(): return ord(pts[0].upper()) - 64, int(pts[1]) if len(pts)>1 and pts[1].isdigit() else 1, int(pts[2]) if len(pts)>2 and pts[2].isdigit() else 1
+        if pts[0].isalpha() and len(pts[0]) == 1: 
+            return ord(pts[0].upper()) - 64, int(pts[1]) if len(pts)>1 and pts[1].isdigit() else 1, int(pts[2]) if len(pts)>2 and pts[2].isdigit() else 1
     h = hash(s)
     return (h % 20) + 1, ((h // 20) % 10) + 1, ((h // 200) % 5) + 1
 
@@ -30,20 +31,23 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
         return
 
     # --- PŘÍPRAVA DAT ---
-    c_type_lx = next((c for c in df_lx03.columns if 'STORAGE TYPE' in str(c).upper() or 'TYP SKLADU' in str(c).upper()), None)
-    c_bin_lx = next((c for c in df_lx03.columns if 'STORAGE BIN' in str(c).upper() or 'SKLADOVÉ MÍSTO' in str(c).upper()), None)
+    c_type_lx = next((c for c in df_lx03.columns if 'STORAGE TYPE' in str(c).upper() or 'TYP SKLAD' in str(c).upper() or 'LAGERTYP' in str(c).upper()), None)
+    c_bin_lx = next((c for c in df_lx03.columns if 'STORAGE BIN' in str(c).upper() or 'SKLADOVÉ MÍSTO' in str(c).upper() or 'LAGERPLATZ' in str(c).upper()), None)
     c_mat_lx = next((c for c in df_lx03.columns if 'MATERIAL' in str(c).upper() or 'MATERIÁL' in str(c).upper()), None)
-    c_bintype_lx = next((c for c in df_lx03.columns if 'STORAGE BIN TYPE' in str(c).upper() or 'TYP SKLAD.MÍSTA' in str(c).upper()), None)
+    c_bintype_lx = next((c for c in df_lx03.columns if 'STORAGE BIN TYPE' in str(c).upper() or 'TYP SKLAD' in str(c).upper() or 'PLATZTYP' in str(c).upper()), None)
     
+    c_type_lt = next((c for c in df_lt10.columns if 'STORAGE TYPE' in str(c).upper() or 'TYP SKLAD' in str(c).upper() or 'LAGERTYP' in str(c).upper()), None)
     c_mat_lt = next((c for c in df_lt10.columns if 'MATERIAL' in str(c).upper() or 'MATERIÁL' in str(c).upper()), None)
-    c_qty_lt = next((c for c in df_lt10.columns if 'AVAILABLE STOCK' in str(c).upper() or 'ZÁSOBA K DISP.' in str(c).upper()), None)
-    c_bintype_lt = next((c for c in df_lt10.columns if 'STORAGE BIN TYPE' in str(c).upper() or 'TYP SKLAD.MÍSTA' in str(c).upper()), None)
-    c_bin_lt = next((c for c in df_lt10.columns if 'STORAGE BIN' in str(c).upper() or 'SKLADOVÉ MÍSTO' in str(c).upper()), None)
-    c_date_lt = next((c for c in df_lt10.columns if 'LAST MOVEMENT' in str(c).upper() or 'POSLEDNÍ POHYB' in str(c).upper()), None)
+    c_qty_lt = next((c for c in df_lt10.columns if 'AVAILABLE STOCK' in str(c).upper() or 'ZÁSOBA K DISP' in str(c).upper() or 'VERFÜGBARER BESTAND' in str(c).upper()), None)
+    c_bintype_lt = next((c for c in df_lt10.columns if 'STORAGE BIN TYPE' in str(c).upper() or 'TYP SKLAD' in str(c).upper() or 'PLATZTYP' in str(c).upper()), None)
+    c_bin_lt = next((c for c in df_lt10.columns if 'STORAGE BIN' in str(c).upper() or 'SKLADOVÉ MÍSTO' in str(c).upper() or 'LAGERPLATZ' in str(c).upper()), None)
+    c_date_lt = next((c for c in df_lt10.columns if 'LAST MOVEMENT' in str(c).upper() or 'POSLEDNÍ POHYB' in str(c).upper() or 'LETZTE BEWEGUNG' in str(c).upper()), None)
 
     lx_clean = df_lx03.copy()
-    if c_type_lx:
-        lx_clean = lx_clean[lx_clean[c_type_lx].astype(str).str.strip().isin(['800', '820'])]
+    if c_type_lx: lx_clean = lx_clean[lx_clean[c_type_lx].astype(str).str.strip().str.lstrip('0').isin(['800', '820'])]
+
+    lt_clean = df_lt10.copy()
+    if c_type_lt: lt_clean = lt_clean[lt_clean[c_type_lt].astype(str).str.strip().str.lstrip('0').isin(['800', '820'])]
 
     tab1, tab2, tab3 = st.tabs(["🚀 Optimalizace & Volná kapacita", "🗺️ 3D Interaktivní Mapa Skladu", "💀 Analýza Ležáků (Dead Stock)"])
 
@@ -75,7 +79,7 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
         with col_sl1: limit_ks = st.slider("Max. limit kusů na paletě pro návrh na přesun:", min_value=1, max_value=50, value=5, step=1)
         
         if c_mat_lt and c_qty_lt and c_bintype_lt:
-            lt_ep = df_lt10[df_lt10[c_bintype_lt].astype(str).str.strip().str.upper().isin(['EP1', 'EP2', 'EP3', 'EP4'])].copy()
+            lt_ep = lt_clean[lt_clean[c_bintype_lt].astype(str).str.strip().str.upper().isin(['EP1', 'EP2', 'EP3', 'EP4'])].copy()
             lt_ep['Qty_Num'] = pd.to_numeric(lt_ep[c_qty_lt], errors='coerce').fillna(0)
             candidates = lt_ep[(lt_ep['Qty_Num'] > 0) & (lt_ep['Qty_Num'] <= limit_ks)].copy()
             
@@ -163,7 +167,7 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             col_ds1, _ = st.columns(2)
             with col_ds1: days_limit = st.slider("Identifikovat palety bez pohybu déle než X dní:", min_value=30, max_value=365, value=90, step=10)
             
-            lt_dead = df_lt10.copy()
+            lt_dead = lt_clean.copy()
             lt_dead['Date_Mov'] = pd.to_datetime(lt_dead[c_date_lt], errors='coerce', dayfirst=True)
             cutoff_date = pd.Timestamp.now().normalize() - pd.Timedelta(days=days_limit)
             
