@@ -144,7 +144,7 @@ def fast_compute_moves(qty_list, queue_list, su_list, box_list, w_list, d_list, 
             else: 
                 p = int(np.ceil(zbytek / safe_h_lim))
                 
-            if len(real_boxes) > 0: 
+            if len(boxes) > 0: 
                 pok += p
             else: 
                 pmiss += p
