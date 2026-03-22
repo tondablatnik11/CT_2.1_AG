@@ -124,39 +124,79 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             df_map['Is_Empty'] = df_map[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', ''])
             
             coords = df_map[c_bin_lx].apply(parse_bin_coords).tolist()
-            df_map['Ulička'] = [c[0] for c in coords]
-            df_map['Sloupec'] = [c[1] for c in coords]
-            df_map['Patro'] = [c[2] for c in coords]
+            # Násobiče pro realistický posun ve fyzickém prostoru (Oddělení uliček pro chodbičky)
+            df_map['X'] = [c[0] * 3.5 for c in coords]
+            df_map['Y'] = [c[1] * 1.0 for c in coords]
+            df_map['Z'] = [(c[2] * 1.3) + 0.2 for c in coords] # Paleta sedí kousek nad nosníkem
             
             df_map['Status'] = np.where(df_map['Is_Empty'], 'Volno', 'Obsazeno')
-            df_map['Color'] = np.where(df_map['Is_Empty'], '#10b981', '#ef4444')
             
-            fig3d = go.Figure(data=[go.Scatter3d(
-                x=df_map['Ulička'], y=df_map['Sloupec'], z=df_map['Patro'],
+            # Barevná paleta:
+            # Volno -> Vysoce průhledná "duchová" zelená krabice
+            # Obsazeno -> Realistická plná barva (hnědožlutá textura krabic / palet s červeným nádechem pro plnost)
+            df_map['Color'] = np.where(df_map['Is_Empty'], 'rgba(16, 185, 129, 0.05)', '#d97706')
+            df_map['LineColor'] = np.where(df_map['Is_Empty'], 'rgba(16, 185, 129, 0.3)', '#92400e')
+            
+            # --- 1. Rychlý Render: Oranžové Horizontální Nosníky (Rack Beams) ---
+            beam_x, beam_y, beam_z = [], [], []
+            for (ul, pa), group in df_map.groupby(['X', 'Z']):
+                beam_x.extend([ul, ul, None])
+                beam_y.extend([group['Y'].min() - 0.5, group['Y'].max() + 0.5, None])
+                beam_z.extend([pa - 0.2, pa - 0.2, None]) # Nosník je těsně pod paletou
+            beam_trace = go.Scatter3d(x=beam_x, y=beam_y, z=beam_z, mode='lines', line=dict(color='#ea580c', width=5), hoverinfo='skip', showlegend=False)
+
+            # --- 2. Rychlý Render: Modré Vertikální Sloupy (Rack Pillars) ---
+            pillar_x, pillar_y, pillar_z = [], [], []
+            for (ul, sl), group in df_map.groupby(['X', 'Y']):
+                pillar_x.extend([ul, ul, None])
+                pillar_y.extend([sl - 0.5, sl - 0.5, None])
+                pillar_z.extend([0, group['Z'].max() + 0.6, None])
+            
+            # Přidání stojny na samotný konec každé řady
+            for ul, group in df_map.groupby('X'):
+                max_sl = group['Y'].max()
+                pillar_x.extend([ul, ul, None])
+                pillar_y.extend([max_sl + 0.5, max_sl + 0.5, None])
+                pillar_z.extend([0, group['Z'].max() + 0.6, None])
+            pillar_trace = go.Scatter3d(x=pillar_x, y=pillar_y, z=pillar_z, mode='lines', line=dict(color='#1e3a8a', width=7), hoverinfo='skip', showlegend=False)
+            
+            # --- 3. Betonová Podlaha (Floor) ---
+            x_min, x_max = df_map['X'].min() - 2, df_map['X'].max() + 2
+            y_min, y_max = df_map['Y'].min() - 2, df_map['Y'].max() + 2
+            floor_trace = go.Mesh3d(
+                x=[x_min, x_max, x_max, x_min], y=[y_min, y_min, y_max, y_max], z=[0, 0, 0, 0],
+                color='#cbd5e1', opacity=0.15, hoverinfo='skip', showlegend=False
+            )
+
+            # --- 4. Samotné Palety / Náklad (Pojiva na nosnících) ---
+            pallets_trace = go.Scatter3d(
+                x=df_map['X'], y=df_map['Y'], z=df_map['Z'],
                 mode='markers',
-                marker=dict(size=6, color=df_map['Color'], opacity=0.8, line=dict(width=0.5, color='rgba(255,255,255,0.2)')),
-                text=df_map[c_bin_lx] + "<br>" + df_map[c_mat_lx] + "<br>" + df_map['Status'],
-                hoverinfo='text'
-            )])
+                marker=dict(
+                    symbol='square', size=7, 
+                    color=df_map['Color'], 
+                    line=dict(width=3, color=df_map['LineColor'])
+                ),
+                text="Lokace: " + df_map[c_bin_lx] + "<br>Zásoba: " + df_map[c_mat_lx] + "<br>Stav: " + df_map['Status'],
+                hoverinfo='text', name='Lokace'
+            )
+            
+            fig3d = go.Figure(data=[floor_trace, pillar_trace, beam_trace, pallets_trace])
             
             fig3d.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                 scene=dict(
-                    xaxis_title='Ulička (Aisle)',
-                    yaxis_title='Sloupec (Stack)',
-                    zaxis_title='Patro (Level)',
-                    xaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.1)'),
-                    yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.1)'),
-                    zaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.1)'),
-                    bgcolor='rgba(0,0,0,0)'
+                    aspectmode='data', # Extrémně důležité: Zachová fyzikální proporce skladu (nebude to zdeformovaná kostka)
+                    xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title='', showbackground=False),
+                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title='', showbackground=False),
+                    zaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title='', showbackground=False),
+                    camera=dict(eye=dict(x=-1.5, y=-1.5, z=0.8)) # Nástřih kamery shora z rohu jako na kamerovém systému
                 ),
-                margin=dict(l=0, r=0, b=0, t=0),
-                height=600
+                margin=dict(l=0, r=0, b=0, t=0), height=750
             )
             st.plotly_chart(fig3d, use_container_width=True)
             
-            st.info("💡 **Tip:** Rotujte myší, scrollujte pro přiblížení. Zelené sektory odhalují kapsy s volnou kapacitou pro cílené naskladnění.")
+            st.info("💡 **Tip:** Toto je přímý Digital Twin vygenerovaný architekturou vašich dat. Oranžové linie značí nosníky, modré svislé stojny drží regály. Prázdný prostor ukazuje uličky. Rotujte myší, scrollujte pro přiblížení k detailům lokací.")
 
     # ============================
     # TAB 3: LEŽÁKY (DEATH STOCK)
