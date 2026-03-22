@@ -31,11 +31,10 @@ def render_admins(df_vekp, df_likp):
         track_input = st.text_input("🔍 Hledat podle sledovacího čísla (Tracking ID):", placeholder="Např. 1ZR1J... nebo 8832...").strip()
         
         if track_input:
-            track_clean = track_input.upper().replace(" ", "")
+            track_clean = track_input.upper().replace(" ", "").lstrip("0")
             
-            # 💡 CHYTRÉ HLEDÁNÍ: Prohledáme ÚPLNĚ VŠECHNY sloupce v LIKP.
-            # Nezáleží na tom, jak se sloupec jmenuje (Frachtbrief, Waybill, atd.), pokud to tam je, najde to.
-            mask = df_likp.astype(str).apply(lambda col: col.str.upper().str.replace(" ", "").str.contains(track_clean, na=False))
+            # 💡 CHYTRÉ HLEDÁNÍ: Prohledáme ÚPLNĚ VŠECHNY sloupce v LIKP bez ohledu na formátování.
+            mask = df_likp.astype(str).apply(lambda col: col.str.upper().str.replace(" ", "").str.replace(r"\.0$", "", regex=True).str.lstrip("0").str.contains(track_clean, na=False, regex=False))
             match_df = df_likp[mask.any(axis=1)]
             
             if not match_df.empty:
