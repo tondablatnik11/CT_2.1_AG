@@ -10,6 +10,14 @@ try:
 except AttributeError:
     fast_render = lambda f: f
 
+def extract_num(part):
+    if not part: return 0
+    digits = re.sub(r'\D', '', str(part))
+    if digits: return int(digits)
+    letters = re.sub(r'[^A-Za-z]', '', str(part))
+    if letters: return sum(ord(c.upper()) - 64 for c in letters)
+    return 0
+
 def parse_bin_coords(bin_str):
     s = str(bin_str).strip()
     pts = s.split('-')
@@ -17,21 +25,19 @@ def parse_bin_coords(bin_str):
     aisle, stack, level, pos = 0, 0, 0, 0
     try:
         if len(pts) >= 4:
-            aisle = int(re.sub(r'\D', '', pts[0])) if re.sub(r'\D', '', pts[0]) else 0
-            stack = int(re.sub(r'\D', '', pts[1])) if re.sub(r'\D', '', pts[1]) else 0
-            level = int(re.sub(r'\D', '', pts[2])) if re.sub(r'\D', '', pts[2]) else 0
-            pos = int(re.sub(r'\D', '', pts[3])) if re.sub(r'\D', '', pts[3]) else 0
+            aisle, stack, level, pos = extract_num(pts[0]), extract_num(pts[1]), extract_num(pts[2]), extract_num(pts[3])
         elif len(pts) == 3:
-            aisle = int(re.sub(r'\D', '', pts[0])) if re.sub(r'\D', '', pts[0]) else 0
-            stack = int(re.sub(r'\D', '', pts[1])) if re.sub(r'\D', '', pts[1]) else 0
-            level = int(re.sub(r'\D', '', pts[2])) if re.sub(r'\D', '', pts[2]) else 0
+            aisle, stack, level = extract_num(pts[0]), extract_num(pts[1]), extract_num(pts[2])
         elif len(pts) == 2:
-            aisle = int(re.sub(r'\D', '', pts[0])) if re.sub(r'\D', '', pts[0]) else 0
-            stack = int(re.sub(r'\D', '', pts[1])) if re.sub(r'\D', '', pts[1]) else 0
+            aisle, stack = extract_num(pts[0]), extract_num(pts[1])
         else:
             nums = re.findall(r'\d+', s)
             if len(nums) >= 3:
                 aisle, stack, level = int(nums[0]), int(nums[1]), int(nums[2])
+            elif len(nums) == 2:
+                aisle, stack = int(nums[0]), int(nums[1])
+            else:
+                aisle = extract_num(s)
     except: pass
     
     return aisle, stack, level, pos
@@ -45,23 +51,31 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
         return
 
     # --- PŘÍPRAVA DAT ---
-    c_type_lx = next((c for c in df_lx03.columns if 'STORAGE TYPE' in str(c).upper() or 'TYP SKLAD' in str(c).upper() or 'LAGERTYP' in str(c).upper()), None)
     c_bin_lx = next((c for c in df_lx03.columns if 'STORAGE BIN' in str(c).upper() or 'SKLADOVÉ MÍSTO' in str(c).upper() or 'LAGERPLATZ' in str(c).upper()), None)
     c_mat_lx = next((c for c in df_lx03.columns if 'MATERIAL' in str(c).upper() or 'MATERIÁL' in str(c).upper()), None)
     c_bintype_lx = next((c for c in df_lx03.columns if 'STORAGE BIN TYPE' in str(c).upper() or 'TYP SKLAD' in str(c).upper() or 'PLATZTYP' in str(c).upper()), None)
     
-    c_type_lt = next((c for c in df_lt10.columns if 'STORAGE TYPE' in str(c).upper() or 'TYP SKLAD' in str(c).upper() or 'LAGERTYP' in str(c).upper()), None)
     c_mat_lt = next((c for c in df_lt10.columns if 'MATERIAL' in str(c).upper() or 'MATERIÁL' in str(c).upper()), None)
     c_qty_lt = next((c for c in df_lt10.columns if 'AVAILABLE STOCK' in str(c).upper() or 'ZÁSOBA K DISP' in str(c).upper() or 'VERFÜGBARER BESTAND' in str(c).upper()), None)
     c_bintype_lt = next((c for c in df_lt10.columns if 'STORAGE BIN TYPE' in str(c).upper() or 'TYP SKLAD' in str(c).upper() or 'PLATZTYP' in str(c).upper()), None)
     c_bin_lt = next((c for c in df_lt10.columns if 'STORAGE BIN' in str(c).upper() or 'SKLADOVÉ MÍSTO' in str(c).upper() or 'LAGERPLATZ' in str(c).upper()), None)
     c_date_lt = next((c for c in df_lt10.columns if 'LAST MOVEMENT' in str(c).upper() or 'POSLEDNÍ POHYB' in str(c).upper() or 'LETZTE BEWEGUNG' in str(c).upper()), None)
 
+    # Univerzální detekce sloupce reprezentujícího zónu / sklad 800 a 820
+    def find_zone_col(df):
+        for c in df.columns:
+            if df[c].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lstrip('0').isin(['800', '820']).any():
+                return c
+        return None
+
+    c_type_lx = find_zone_col(df_lx03)
+    c_type_lt = find_zone_col(df_lt10)
+
     lx_clean = df_lx03.copy()
-    if c_type_lx: lx_clean = lx_clean[lx_clean[c_type_lx].astype(str).str.strip().str.lstrip('0').isin(['800', '820'])]
+    if c_type_lx: lx_clean = lx_clean[lx_clean[c_type_lx].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lstrip('0').isin(['800', '820'])]
 
     lt_clean = df_lt10.copy()
-    if c_type_lt: lt_clean = lt_clean[lt_clean[c_type_lt].astype(str).str.strip().str.lstrip('0').isin(['800', '820'])]
+    if c_type_lt: lt_clean = lt_clean[lt_clean[c_type_lt].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lstrip('0').isin(['800', '820'])]
 
     tab1, tab2, tab3 = st.tabs(["🚀 Optimalizace & Volná kapacita", "🗺️ 3D Interaktivní Mapa Skladu", "💀 Analýza Ležáků (Dead Stock)"])
 
@@ -139,8 +153,12 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             df_map['Y'] = [(c[1] * 6.0) + c[3] for c in coords]
             df_map['Z'] = [(c[2] if c[2] <= 10 else c[2] / 3.0) + 0.5 for c in coords]
             
-            # Bezpečnostní filtr, kdyby se náhodou připletlo vadné jméno pozice bez čísel
+            # Bezpečnostní filtr, kdyby se náhodou připletlo vadné jméno pozice
             df_map = df_map[df_map['X'] > 0].copy()
+            
+            if df_map.empty:
+                st.warning("⚠️ Po dekódování databáze nebyla nalezena matematicky renderovatelná struktura pro tyto zóny.")
+                return
             
             df_map['Status'] = np.where(df_map['Is_Empty'], 'Volno', 'Obsazeno')
             
