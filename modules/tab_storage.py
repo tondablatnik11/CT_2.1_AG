@@ -145,33 +145,26 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             df_map['Is_Empty'] = df_map[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', ''])
             
             coords = df_map[c_bin_lx].apply(parse_bin_coords).tolist()
+            # Fyzikální mapa souřadnic:
+            # X = Ulička. Násobíme masivně (50) aby se mezi uličky vešel projíždějící vozík.
+            # Y = Dům + Pozice. Dům násobíme (6), protože jsou v něm 3 palety nebo víc KLT. Pozici jen přičteme.
+            # Z = Výška. SAP výšky 10-70 dělíme 3. Malé výšky (1-6) ponecháme.
+            df_map['X'] = [c[0] * 50.0 for c in coords]
+            df_map['Y'] = [(c[1] * 6.0) + c[3] for c in coords]
+            df_map['Z'] = [(c[2] if c[2] <= 10 else c[2] / 3.0) + 0.5 for c in coords]
             
-            df_map['Raw_Aisle'] = [c[0] for c in coords]
-            df_map['Raw_Stack'] = [c[1] for c in coords]
-            df_map['Raw_Level'] = [c[2] for c in coords]
-            df_map['Raw_Pos']   = [c[3] for c in coords]
-            
-            # Bezpečnostní filtr proti gigantickým outlierům.
-            # SAP často obsahuje virtuální zóny (např. 'WE-ZONE-800' -> Aisle=800). 
-            # Tyto anomálie zničí měřítko a stáhnou celý graf do jedné tenké čáry.
-            df_map = df_map[
-                (df_map['Raw_Aisle'] > 0) & (df_map['Raw_Aisle'] <= 100) &
-                (df_map['Raw_Stack'] > 0) & (df_map['Raw_Stack'] <= 200) &
-                (df_map['Raw_Level'] > 0) & (df_map['Raw_Level'] <= 200)
-            ].copy()
+            # Bezpečnostní filtr, kdyby se náhodou připletlo vadné jméno pozice
+            df_map = df_map[df_map['X'] > 0].copy()
             
             if df_map.empty:
-                st.warning("⚠️ Po filtraci atypických (virtuálních) lokací nezbyla ve skladu žádná standardní data k vykreslení.")
+                st.warning("⚠️ Po dekódování databáze nebyla nalezena matematicky renderovatelná struktura pro tyto zóny.")
                 return
-                
-            # Fyzikální transformace na vizuální souřadnice
-            df_map['X'] = df_map['Raw_Aisle'] * 30.0
-            df_map['Y'] = (df_map['Raw_Stack'] * 5.0) + df_map['Raw_Pos']
-            df_map['Z'] = df_map['Raw_Level'].apply(lambda lvl: (lvl / 10.0) * 2.5 if lvl >= 10 else lvl * 0.4) + 0.1
             
             df_map['Status'] = np.where(df_map['Is_Empty'], 'Volno', 'Obsazeno')
             
-            # Barvy: Volno = průhledná zelená, Obsazeno = masivní oranžovožlutá (evokující palety/kartony)
+            # Barevná paleta:
+            # Volno -> Vysoce průhledná "duchová" zelená krabice
+            # Obsazeno -> Realistická plná barva (hnědožlutá textura krabic / palet s červeným nádechem pro plnost)
             df_map['Color'] = np.where(df_map['Is_Empty'], 'rgba(16, 185, 129, 0.05)', '#d97706')
             df_map['LineColor'] = np.where(df_map['Is_Empty'], 'rgba(16, 185, 129, 0.3)', '#92400e')
             
@@ -180,25 +173,23 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             for (ul, pa), group in df_map.groupby(['X', 'Z']):
                 beam_x.extend([ul, ul, None])
                 beam_y.extend([group['Y'].min() - 0.5, group['Y'].max() + 0.5, None])
-                beam_z.extend([pa - 0.1, pa - 0.1, None])
-            beam_trace = go.Scatter3d(x=beam_x, y=beam_y, z=beam_z, mode='lines', line=dict(color='#ea580c', width=4), hoverinfo='skip', showlegend=False)
+                beam_z.extend([pa - 0.2, pa - 0.2, None]) # Nosník je těsně pod paletou
+            beam_trace = go.Scatter3d(x=beam_x, y=beam_y, z=beam_z, mode='lines', line=dict(color='#ea580c', width=5), hoverinfo='skip', showlegend=False)
 
             # --- 2. Rychlý Render: Modré Vertikální Sloupy (Rack Pillars) ---
             pillar_x, pillar_y, pillar_z = [], [], []
-            for (ul, sl), group in df_map.groupby(['X', 'Raw_Stack']):
-                y_pos = sl * 5.0 - 0.5
+            for (ul, sl), group in df_map.groupby(['X', 'Y']):
                 pillar_x.extend([ul, ul, None])
-                pillar_y.extend([y_pos, y_pos, None])
-                pillar_z.extend([0, group['Z'].max() + 0.5, None])
+                pillar_y.extend([sl - 0.5, sl - 0.5, None])
+                pillar_z.extend([0, group['Z'].max() + 0.6, None])
             
+            # Přidání stojny na samotný konec každé řady
             for ul, group in df_map.groupby('X'):
-                max_sl = group['Raw_Stack'].max()
-                y_pos = max_sl * 5.0 + group['Raw_Pos'].max() + 0.5
+                max_sl = group['Y'].max()
                 pillar_x.extend([ul, ul, None])
-                pillar_y.extend([y_pos, y_pos, None])
-                pillar_z.extend([0, group['Z'].max() + 0.5, None])
-                
-            pillar_trace = go.Scatter3d(x=pillar_x, y=pillar_y, z=pillar_z, mode='lines', line=dict(color='#1e3a8a', width=6), hoverinfo='skip', showlegend=False)
+                pillar_y.extend([max_sl + 0.5, max_sl + 0.5, None])
+                pillar_z.extend([0, group['Z'].max() + 0.6, None])
+            pillar_trace = go.Scatter3d(x=pillar_x, y=pillar_y, z=pillar_z, mode='lines', line=dict(color='#1e3a8a', width=7), hoverinfo='skip', showlegend=False)
             
             # --- 3. Betonová Podlaha (Floor) ---
             x_min, x_max = df_map['X'].min() - 2, df_map['X'].max() + 2
@@ -226,11 +217,11 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             fig3d.update_layout(
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                 scene=dict(
-                    aspectmode='auto', # Změněno z 'data' na 'auto': Zabraňuje smrsknutí grafu do neviditelné tenké linky vlivem masivních rozahů X/Y os vůči ose Z! Plotly to inteligentně natáhne do čitelné kostky!
+                    aspectmode='data', # Extrémně důležité: Zachová fyzikální proporce skladu (nebude to zdeformovaná kostka)
                     xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title='', showbackground=False),
                     yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title='', showbackground=False),
                     zaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title='', showbackground=False),
-                    camera=dict(eye=dict(x=-1.5, y=-1.5, z=0.8)) 
+                    camera=dict(eye=dict(x=-1.5, y=-1.5, z=0.8)) # Nástřih kamery shora z rohu jako na kamerovém systému
                 ),
                 margin=dict(l=0, r=0, b=0, t=0), height=750
             )
