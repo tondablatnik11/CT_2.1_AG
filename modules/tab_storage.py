@@ -12,15 +12,29 @@ except AttributeError:
 
 def parse_bin_coords(bin_str):
     s = str(bin_str).strip()
-    nums = re.findall(r'\d+', s)
-    if len(nums) >= 3: return int(nums[0]), int(nums[1]), int(nums[2])
-    if len(nums) == 2: return int(nums[0]), int(nums[1]), 1
-    if '-' in s:
-        pts = s.split('-')
-        if pts[0].isalpha() and len(pts[0]) == 1: 
-            return ord(pts[0].upper()) - 64, int(pts[1]) if len(pts)>1 and pts[1].isdigit() else 1, int(pts[2]) if len(pts)>2 and pts[2].isdigit() else 1
-    h = hash(s)
-    return (h % 20) + 1, ((h // 20) % 10) + 1, ((h // 200) % 5) + 1
+    pts = s.split('-')
+    
+    aisle, stack, level, pos = 0, 0, 0, 0
+    try:
+        if len(pts) >= 4:
+            aisle = int(re.sub(r'\D', '', pts[0])) if re.sub(r'\D', '', pts[0]) else 0
+            stack = int(re.sub(r'\D', '', pts[1])) if re.sub(r'\D', '', pts[1]) else 0
+            level = int(re.sub(r'\D', '', pts[2])) if re.sub(r'\D', '', pts[2]) else 0
+            pos = int(re.sub(r'\D', '', pts[3])) if re.sub(r'\D', '', pts[3]) else 0
+        elif len(pts) == 3:
+            aisle = int(re.sub(r'\D', '', pts[0])) if re.sub(r'\D', '', pts[0]) else 0
+            stack = int(re.sub(r'\D', '', pts[1])) if re.sub(r'\D', '', pts[1]) else 0
+            level = int(re.sub(r'\D', '', pts[2])) if re.sub(r'\D', '', pts[2]) else 0
+        elif len(pts) == 2:
+            aisle = int(re.sub(r'\D', '', pts[0])) if re.sub(r'\D', '', pts[0]) else 0
+            stack = int(re.sub(r'\D', '', pts[1])) if re.sub(r'\D', '', pts[1]) else 0
+        else:
+            nums = re.findall(r'\d+', s)
+            if len(nums) >= 3:
+                aisle, stack, level = int(nums[0]), int(nums[1]), int(nums[2])
+    except: pass
+    
+    return aisle, stack, level, pos
 
 @fast_render
 def render_storage(df_lx03, df_lt10, df_marm, df_pick):
@@ -55,62 +69,55 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
     # TAB 1: KAPACITA A PŘESUNY
     # ============================
     with tab1:
-        st.markdown("#### 📊 Kapacita skladu (Zóny 800 a 820)")
-        if c_bintype_lx and c_mat_lx:
-            lx_clean['Is_Empty'] = lx_clean[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', ''])
-            cap_agg = lx_clean.groupby([c_bintype_lx, 'Is_Empty']).size().reset_index(name='Count')
-            cap_pivot = cap_agg.pivot(index=c_bintype_lx, columns='Is_Empty', values='Count').fillna(0)
-            if True in cap_pivot.columns: cap_pivot.rename(columns={True: 'Volné'}, inplace=True)
-            if False in cap_pivot.columns: cap_pivot.rename(columns={False: 'Obsazené'}, inplace=True)
-            cap_pivot['Celkem'] = cap_pivot.get('Volné', 0) + cap_pivot.get('Obsazené', 0)
-            cap_pivot['Využití (%)'] = (cap_pivot.get('Obsazené', 0) / cap_pivot['Celkem'] * 100).round(1)
-            
-            c1, c2 = st.columns([2, 3])
-            with c1: st.dataframe(cap_pivot[['Obsazené', 'Volné', 'Využití (%)']].style.format({'Využití (%)': "{:.1f} %"}), use_container_width=True)
-            with c2:
-                fig = px.bar(cap_agg, x=c_bintype_lx, y='Count', color='Is_Empty', title="Obsazenost podle typu lokace", color_discrete_map={True: '#10b981', False: '#ef4444'}, labels={'Is_Empty': 'Prázdné?'})
-                fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig, use_container_width=True)
-        st.divider()
+        st.markdown("#### 📊 Kapacita skladu (Rozděleno dle Zón)")
+        if c_bintype_lx and c_mat_lx and c_type_lx:
+            for sk_zone in ['800', '820']:
+                df_zone = lx_clean[lx_clean[c_type_lx].astype(str).str.strip().str.lstrip('0') == sk_zone].copy()
+                if df_zone.empty: continue
+                
+                st.markdown(f"##### Skladová Zóna {sk_zone}")
+                df_zone['Is_Empty'] = df_zone[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', ''])
+                
+                obs = len(df_zone[df_zone['Is_Empty'] == False])
+                vol = len(df_zone[df_zone['Is_Empty'] == True])
+                celkem = obs + vol
+                
+                c_met, c_pie, c_bar = st.columns([1, 1, 2])
+                with c_met:
+                    st.metric(f"Míst Celkem [{sk_zone}]", f"{celkem}")
+                    st.metric("Obsazeno", f"{obs}", f"{(obs/celkem*100):.1f}%" if celkem else "0%")
+                    st.metric("Volno", f"{vol}")
+                    
+                with c_pie:
+                    fig_pie = px.pie(names=['Obsazené', 'Volné'], values=[obs, vol], hole=0.7, color_discrete_sequence=['#ef4444', '#10b981'])
+                    fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10,b=10,l=10,r=10))
+                    st.plotly_chart(fig_pie, use_container_width=True, key=f"pie_{sk_zone}")
+                    
+                with c_bar:
+                    cap_agg = df_zone.groupby([c_bintype_lx, 'Is_Empty']).size().reset_index(name='Count')
+                    cap_agg['Stav'] = np.where(cap_agg['Is_Empty'], 'Volné', 'Obsazené')
+                    fig_bar = px.bar(cap_agg, x=c_bintype_lx, y='Count', color='Stav', barmode='stack', color_discrete_map={'Volné': '#10b981', 'Obsazené': '#ef4444'})
+                    fig_bar.update_layout(title="Obsazenost dle typu pozice", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_title="")
+                    st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_{sk_zone}")
+                st.divider()
 
-        st.markdown("#### 💡 Doporučené přesuny zbytkových kusů z Palet (EP1-EP4) do Regálů (K1)")
-        st.write("Aplikace hledá palety určené pro 'Downsizing'. Zaručuje 100% jistotu díky 3D výpočtům průniku regálu a rozměrů obalu materiálu.")
+        st.markdown("#### 💡 Doporučené přesuny zbytkových kusů z Palet do Regálů (K1)")
+        st.write("Skener hledá palety na pozicích (EP1/P1, EP2/P2, EP3/PE3, EP4/P4), kde zůstal jen nepatrný počet kusů, které zbytečně blokují paletové místo a lze je ručně přeskladnit.")
         col_sl1, col_sl2 = st.columns(2)
-        with col_sl1: limit_ks = st.slider("Max. limit kusů na paletě pro návrh na přesun:", min_value=1, max_value=50, value=5, step=1)
+        with col_sl1: limit_ks = st.slider("Max. limit kusů na paletě pro návrh na přesun:", min_value=1, max_value=50, value=10, step=1)
         
         if c_mat_lt and c_qty_lt and c_bintype_lt:
-            lt_ep = lt_clean[lt_clean[c_bintype_lt].astype(str).str.strip().str.upper().isin(['EP1', 'EP2', 'EP3', 'EP4'])].copy()
+            valid_types = ['EP1', 'P1', 'EP2', 'P2', 'EP3', 'PE3', 'P3', 'EP4', 'P4']
+            lt_ep = lt_clean[lt_clean[c_bintype_lt].astype(str).str.strip().str.upper().isin(valid_types)].copy()
             lt_ep['Qty_Num'] = pd.to_numeric(lt_ep[c_qty_lt], errors='coerce').fillna(0)
             candidates = lt_ep[(lt_ep['Qty_Num'] > 0) & (lt_ep['Qty_Num'] <= limit_ks)].copy()
             
             if not candidates.empty:
-                if df_marm is not None:
-                    c_marm_mat = next((c for c in df_marm.columns if 'MATERIAL' in str(c).upper() or 'MATERIÁL' in str(c).upper()), df_marm.columns[0])
-                    c_len = next((c for c in df_marm.columns if 'LENGTH' in str(c).upper() or 'LÄNGE' in str(c).upper() or 'DÉLKA' in str(c).upper()), None)
-                    c_wid = next((c for c in df_marm.columns if 'WIDTH' in str(c).upper() or 'BREITE' in str(c).upper() or 'ŠÍŘKA' in str(c).upper()), None)
-                    c_hei = next((c for c in df_marm.columns if 'HEIGHT' in str(c).upper() or 'HÖHE' in str(c).upper() or 'VÝŠKA' in str(c).upper()), None)
-                    
-                    if c_len and c_wid and c_hei:
-                        valid_mats = []
-                        for _, r in df_marm.iterrows():
-                            mat = str(r[c_marm_mat]).strip().lstrip('0')
-                            try:
-                                l, w, h = float(str(r[c_len]).replace(',','.')), float(str(r[c_wid]).replace(',','.')), float(str(r[c_hei]).replace(',','.'))
-                                dims = sorted([l, w, h])
-                                if dims[0] <= 40 and dims[1] <= 45 and dims[2] <= 55: valid_mats.append(mat)
-                            except: pass
-                        
-                        candidates['Clean_Mat'] = candidates[c_mat_lt].astype(str).str.strip().str.lstrip('0')
-                        approved = candidates[candidates['Clean_Mat'].isin(valid_mats)].copy()
-                        if not approved.empty:
-                            st.success(f"Nalezeno {len(approved)} palet, které lze bezpečně přesunout!")
-                            disp_app = approved[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt]].copy()
-                            disp_app.columns = ['Současná pozice', 'Typ lokace', 'Materiál (SAP)', 'Zásoba k přesunu']
-                            st.dataframe(disp_app.sort_values('Zásoba k přesunu'), hide_index=True, use_container_width=True)
-                        else: st.info("Žádné materiály s požadovaným zůstatkem nesplňují fyzické rozměry (55x45x40 cm) pro vložení do police K1.")
-                    else: st.warning("V nahraném MARM reportu chybí sloupce pro rozměry (Délka/Šířka/Výška).")
-                else: st.info("Pro ověření fyzických rozměrů krabic vůči pozici (aby se vešly) prosím nahrajte MARM report v Admin Zóně.")
-            else: st.info(f"Ve skladech nejsou instalovány žádné palety se zbytkovým objemem menším jak {limit_ks} ks.")
+                st.success(f"Nalezeno {len(candidates)} palet vhodných k nezbytnému spojení / 'Downsizingu' na KLT!")
+                disp_app = candidates[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt]].copy()
+                disp_app.columns = ['Současná pozice', 'Typ lokace', 'Materiál (SAP)', 'Zásoba k přesunu']
+                st.dataframe(disp_app.sort_values('Zásoba k přesunu'), hide_index=True, use_container_width=True)
+            else: st.info(f"Ve skladech nejsou instalovány žádné palety specifikovaných typů s objemem menším jak {limit_ks} ks.")
 
     # ============================
     # TAB 2: 3D MAPA SKLADU
@@ -124,10 +131,16 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             df_map['Is_Empty'] = df_map[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', ''])
             
             coords = df_map[c_bin_lx].apply(parse_bin_coords).tolist()
-            # Násobiče pro realistický posun ve fyzickém prostoru (Oddělení uliček pro chodbičky)
-            df_map['X'] = [c[0] * 3.5 for c in coords]
-            df_map['Y'] = [c[1] * 1.0 for c in coords]
-            df_map['Z'] = [(c[2] * 1.3) + 0.2 for c in coords] # Paleta sedí kousek nad nosníkem
+            # Fyzikální mapa souřadnic:
+            # X = Ulička. Násobíme masivně (50) aby se mezi uličky vešel projíždějící vozík.
+            # Y = Dům + Pozice. Dům násobíme (6), protože jsou v něm 3 palety nebo víc KLT. Pozici jen přičteme.
+            # Z = Výška. SAP výšky 10-70 dělíme 3. Malé výšky (1-6) ponecháme.
+            df_map['X'] = [c[0] * 50.0 for c in coords]
+            df_map['Y'] = [(c[1] * 6.0) + c[3] for c in coords]
+            df_map['Z'] = [(c[2] if c[2] <= 10 else c[2] / 3.0) + 0.5 for c in coords]
+            
+            # Bezpečnostní filtr, kdyby se náhodou připletlo vadné jméno pozice bez čísel
+            df_map = df_map[df_map['X'] > 0].copy()
             
             df_map['Status'] = np.where(df_map['Is_Empty'], 'Volno', 'Obsazeno')
             
