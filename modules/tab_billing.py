@@ -499,6 +499,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 pocet_casti=("Delivery", "count"), 
                 pocet_to=("pocet_to", "sum"), 
                 pocet_hu=("pocet_hu", "sum"), 
+                pocet_mat=("pocet_mat", "sum"), 
                 pocet_lok=("pocet_lokaci", "sum"), 
                 poh=("pohyby_celkem", "sum"), 
                 bilance=("Bilance", "sum"), 
@@ -507,12 +508,13 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
             
             cat_sum["prum_poh"] = np.where(cat_sum["pocet_lok"] > 0, cat_sum["poh"] / cat_sum["pocet_lok"], 0)
             
-            disp = cat_sum[["Category_Full", "pocet_casti", "pocet_to", "pocet_hu", "prum_poh", "bilance", "to_navic"]].copy()
+            disp = cat_sum[["Category_Full", "pocet_casti", "pocet_to", "pocet_hu", "pocet_mat", "prum_poh", "bilance", "to_navic"]].copy()
             disp.columns = [
                 _t("Kategorie HU", "HU Category"), 
                 _t("Části zakázek", "Order Parts"), 
                 _t("Počet TO", "Total TO"), 
                 _t("Zúčtované HU", "Billed HU"), 
+                _t("Položky (Items)", "Items"), 
                 _t("Prům. pohybů na lokaci", "Avg Moves/Location"), 
                 _t("Čistá bilance (Zisk/Ztráta)", "Net Balance (Profit/Loss)"), 
                 _t("Hrubá ztráta (TO navíc)", "Gross Loss (Extra TO)")
@@ -529,11 +531,12 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 det_df["prum_poh_lok"] = np.where(det_df["pocet_lokaci"] > 0, det_df["pohyby_celkem"] / det_df["pocet_lokaci"], 0)
                 det_df = det_df.sort_values(by="Bilance", ascending=False)
                 
-                disp_det = det_df[["Delivery", "pocet_to", "pocet_hu", "prum_poh_lok", "Bilance"]].copy()
+                disp_det = det_df[["Delivery", "pocet_to", "pocet_hu", "pocet_mat", "prum_poh_lok", "Bilance"]].copy()
                 disp_det.columns = [
                     _t("Zakázka (Delivery)", "Order (Delivery)"), 
                     _t("Počet TO", "Total TO"), 
                     _t("Zabalené HU", "Packed HU"), 
+                    _t("Položky (Items)", "Items"), 
                     _t("Prům. pohybů na lok.", "Avg Moves/Loc"), 
                     _t("Čistá bilance (TO navíc)", "Net Balance (Extra TO)")
                 ]
@@ -645,6 +648,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
             celkem=('Delivery', 'count'), 
             to_celkem=('pocet_to', 'sum'), 
             hu_celkem=('pocet_hu', 'sum'), 
+            mat_celkem=('pocet_mat', 'sum'), 
             pohyby_celkem=('pohyby_celkem', 'sum'), 
             count_1_1=('is_1_to_1', 'sum'), 
             count_more_to=('is_more_to', 'sum'), 
@@ -666,7 +670,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
         ratio_table['Čistá bilance'] = ratio_table['hu_celkem'] - ratio_table['to_celkem'] 
         
         disp_ratio = ratio_table[[
-            'Category_Full', 'celkem', 'to_celkem', 'hu_celkem', 
+            'Category_Full', 'celkem', 'to_celkem', 'hu_celkem', 'mat_celkem', 
             'Index (TO na 1 HU)', 'Pohyby na 1 HU', 
             '1:1 (Ideál)', 'Více TO (Počet)', 'ztrata_to', 
             'Více HU (Počet)', 'zisk_hu', 'Čistá bilance'
@@ -677,6 +681,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
             _t("Částí zakázek", "Order Parts"), 
             _t("TO Celkem", "Total TO"), 
             _t("HU Celkem", "Total HU"), 
+            _t("Položky (Items) Celkem", "Total Items"), 
             _t("Index konsolidace (TO/HU)", "Consolidation Index (TO/HU)"), 
             _t("Fyzické pohyby na 1 Billed HU", "Physical Moves / Billed HU"), 
             _t("1:1 (Ideál)", "1:1 (Ideal)"), 
@@ -817,13 +822,14 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
         imb_df = billing_df[billing_df['TO_navic'] > 0].sort_values("TO_navic", ascending=False).head(50)
         
         if not imb_df.empty:
-            imb_disp = imb_df[['Delivery', 'Category_Full', 'pocet_to', 'pohyby_celkem', 'pocet_hu', 'TO_navic']].copy()
+            imb_disp = imb_df[['Delivery', 'Category_Full', 'pocet_to', 'pohyby_celkem', 'pocet_hu', 'pocet_mat', 'TO_navic']].copy()
             imb_disp.columns = [
                 _t("Delivery", "Delivery"), 
                 _t("Kategorie", "Category"), 
                 _t("Pick TO celkem", "Total Pick TOs"), 
                 _t("Pohyby rukou", "Hand Moves"), 
                 _t("Účtované HU", "Billed HU"), 
+                _t("Položky (Items)", "Items"), 
                 _t("Prodělek (Rozdíl)", "Loss (Difference)")
             ]
             st.dataframe(imb_disp, use_container_width=True, hide_index=True)
