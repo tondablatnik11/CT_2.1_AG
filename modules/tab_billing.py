@@ -570,6 +570,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 tr_df = plot_df.groupby("Month").agg(
                     to_sum=("pocet_to", "sum"), 
                     hu_sum=("pocet_hu", "sum"), 
+                    mat_sum=("pocet_mat", "sum"), # <-- Přidáno: Položky (Items)
                     poh=("pohyby_celkem", "sum"), 
                     lok=("pocet_lokaci", "sum")
                 ).reset_index()
@@ -591,6 +592,14 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                     name=_t('Počet HU', 'Total HUs'), 
                     marker_color='#818cf8', 
                     text=tr_df['hu_sum'], 
+                    textposition='auto'
+                ))
+                fig.add_trace(go.Bar(
+                    x=tr_df['Month'], 
+                    y=tr_df['mat_sum'], 
+                    name=_t('Položky (Items)', 'Total Items'), 
+                    marker_color='#f59e0b', # <-- Přidáno: Sloupec oranžové barvy
+                    text=tr_df['mat_sum'], 
                     textposition='auto'
                 ))
                 fig.add_trace(go.Scatter(
