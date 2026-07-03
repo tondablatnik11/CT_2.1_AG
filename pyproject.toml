@@ -1,0 +1,25 @@
+# Ruff konfigurace pro Warehouse Control Tower
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".venv", "__pycache__", "tests"]
+
+[tool.ruff.lint]
+# Pravidla: E (pycodestyle errors), W (warnings), F (pyflakes), I (isort)
+select = ["E", "W", "F", "I"]
+ignore = [
+    "E501",  # Line too long - máme vlastní pravidla pro SQL/HTML stringy
+    "E402",  # Module level import not at top - nutné pro lazy loading
+    "E731",  # Do not assign a lambda expression - používáme záměrně
+    "W291",  # Trailing whitespace
+    "W292",  # No newline at end of file
+    "W605",  # Invalid escape sequence - v SAP datech jsou záměrné
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test soubory mohou mít volnější pravidla
+"tests/**/*.py" = ["E402", "F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

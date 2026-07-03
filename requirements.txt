@@ -1,8 +1,11 @@
-streamlit
-pandas
-numpy
-plotly
-streamlit-option-menu
-openpyxl
-pyarrow
-supabase
+# Runtime dependencies for Warehouse Control Tower
+# Pinned verze zajišťují reprodukovatelné buildy na Streamlit Cloud
+
+streamlit==1.58.0
+pandas==3.0.3
+numpy==2.5.0
+plotly==6.8.0
+streamlit-option-menu==0.4.0
+openpyxl==3.1.5
+pyarrow==24.0.0
+supabase==2.31.0

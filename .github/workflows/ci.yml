@@ -1,0 +1,187 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ==========================================
+  # 1. SYNTAX CHECK - musí projít jako gate
+  # ==========================================
+  syntax-check:
+    name: Python Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate syntax of all Python files
+        run: |
+          python -c "
+          import ast, os, sys
+          errors = []
+          for root, dirs, files in os.walk('.'):
+              if '__pycache__' in root or '.git' in root or '.venv' in root:
+                  continue
+              for f in files:
+                  if f.endswith('.py'):
+                      path = os.path.join(root, f)
+                      try:
+                          with open(path, 'r', encoding='utf-8') as fh:
+                              ast.parse(fh.read())
+                      except SyntaxError as e:
+                          errors.append(f'{path}: {e}')
+          if errors:
+              print('SYNTAX ERRORS:')
+              for e in errors:
+                  print(f'  {e}')
+              sys.exit(1)
+          print(f'OK - all Python files syntactically valid')
+          "
+
+  # ==========================================
+  # 2. UNIT TESTY - pytest
+  # ==========================================
+  unit-tests:
+    name: Unit Tests (pytest)
+    runs-on: ubuntu-latest
+    needs: syntax-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest with coverage
+        run: |
+          pytest tests/ --cov=modules --cov=database --cov-report=term --cov-report=xml -v
+
+      - name: Upload coverage to Codecov (optional)
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  # ==========================================
+  # 3. IMPORT CHECK - ověří že importy fungují
+  # ==========================================
+  import-check:
+    name: Module Import Check
+    runs-on: ubuntu-latest
+    needs: syntax-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify critical functions are importable
+        run: |
+          python -c "
+          import sys
+
+          critical_imports = [
+              ('modules.utils', ['fast_compute_moves', 'detect_vollpalettes', 'parse_packing_time', 'get_match_key', 'safe_hu', 'safe_del', 'is_box', 'apply_chart_defaults']),
+              ('modules.safe_render', ['safe_render', 'ErrorBoundary', 'validate_dataframe']),
+              ('database', ['save_to_db', 'load_from_db', 'clear_cache', '_is_not_found_error']),
+              ('modules.tab_dashboard', ['render_dashboard']),
+              ('modules.tab_billing', ['render_billing', 'cached_billing_logic_v28']),
+              ('modules.tab_fu', ['render_fu']),
+              ('modules.tab_packing', ['render_packing']),
+              ('modules.tab_admins', ['render_admins']),
+              ('modules.tab_storage', ['render_storage']),
+              ('modules.tab_audit', ['render_audit']),
+              ('modules.tab_top', ['render_top']),
+              ('modules.tab_pallets', ['render_pallets']),
+              ('modules.tab_fu_compare', ['render_fu_compare']),
+              ('modules.tab_board', ['render_board']),
+              ('modules.tab_daily_kpi', ['render_daily_kpi']),
+              ('modules.tab_monthly_kpi', ['render_monthly_kpi']),
+          ]
+
+          all_ok = True
+          for module_name, functions in critical_imports:
+              try:
+                  mod = __import__(module_name, fromlist=functions)
+                  for fn in functions:
+                      if not hasattr(mod, fn):
+                          print(f'  FAIL: {module_name}.{fn} - NOT FOUND')
+                          all_ok = False
+                      else:
+                          print(f'  OK: {module_name}.{fn}')
+              except Exception as e:
+                  print(f'  FAIL: {module_name} - import error: {e}')
+                  all_ok = False
+
+          if not all_ok:
+              print('IMPORT CHECK FAILED')
+              sys.exit(1)
+          print('All imports OK')
+          "
+
+  # ==========================================
+  # 4. LINTING - kontrola kódu
+  # ==========================================
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    needs: syntax-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ruff
+        run: pip install ruff==0.7.4
+
+      - name: Run ruff
+        run: |
+          ruff check modules/ database.py app.py --output-format=concise || echo "Lint warnings (non-blocking)"
+        continue-on-error: true
+
+  # ==========================================
+  # 5. PROJECT STATS - přehled velikosti kódu
+  # ==========================================
+  stats:
+    name: Project Stats
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count lines of code
+        run: |
+          echo "## Soubor | Řádků"
+          echo "---------|------"
+          for f in app.py database.py modules/*.py; do
+            if [ -f "$f" ]; then
+              lines=$(wc -l < "$f")
+              printf "%-30s %s\n" "$f" "$lines"
+            fi
+          done
+          echo ""
+          total=$(cat app.py database.py modules/*.py 2>/dev/null | wc -l)
+          echo "**Celkem:** $total řádků"
