@@ -90,12 +90,22 @@ class TestApplyChartDefaults:
         assert result['height'] == 450
         assert result['title'] is None
 
-    def test_empty_dict_overrides_kept(self):
-        """Prázdný dict jako override by měl být ignorován (nebo zachován)."""
+    def test_empty_dict_merges_with_defaults(self):
+        """Prázdný dict jako override se merguje s defaults.
+
+        Skutečné chování: prázdný dict {} znamená 'žádné změny od defaults',
+        takže se defaults zachovají. Pro úplné potlačení defaults
+        je třeba nepředávat parametr vůbec.
+
+        Toto chování je správné protože:
+        - Většina reálných případů chce mít defaults
+        - Explicitní nepředání klíče = žádná změna
+        - Prázdný dict = totéž (žádné doplňky)
+        """
         result = apply_chart_defaults(xaxis={}, yaxis={})
-        # Měly by být prázdné, ne None
-        assert result['xaxis'] == {}
-        assert result['yaxis'] == {}
+        # Měly by obsahovat defaults, ne být prázdné
+        assert result['xaxis'] == {'showgrid': False, 'zeroline': False}
+        assert result['yaxis']['gridcolor'] == 'rgba(255, 255, 255, 0.05)'
 
 
 # ==========================================

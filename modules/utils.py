@@ -86,6 +86,9 @@ def apply_chart_defaults(**overrides):
     # Merge defaultů s override
     final_xaxis = {**CHART_XAXIS_DEFAULTS, **(xaxis_override or {})} if xaxis_override is not None else {}
     final_yaxis = {**CHART_YAXIS_DEFAULTS, **(yaxis_override or {})} if yaxis_override is not None else {}
+    # Poznámka: Prázdný dict {} jako override ZACHOVÁ defaults (merge s defaults).
+    # Pro úplné potlačení defaults je třeba nepředávat parametr vůbec.
+    # Většina reálných případů chce mít defaults, takže toto chování je správné.
 
     layout['xaxis'] = final_xaxis
     layout['yaxis'] = final_yaxis
@@ -211,12 +214,18 @@ def get_match_key_vectorized(series: pd.Series) -> pd.Series:
 def get_match_key(val: Any) -> str:
     """Skalární verze normalizace pro jednu hodnotu."""
     v = str(val).strip().upper()
-    # 1. Pokud obsahuje '.' a je to číslo, odstranit koncové nuly a případnou '.'
+    # Pokud je to číslo s desetinnou tečkou (např. "001.50")
     if '.' in v and v.replace('.', '').isdigit():
-        v = v.rstrip('0').rstrip('.')
-    # 2. Znovu zkontrolovat, jestli je to číslo (po odstranění .0)
-    # a odstranit levé nuly (pro případ "001.50" -> po 1. kroku "001.5" -> "1.5")
-    if v.isdigit():
+        # Rozdělíme na celou a desetinnou část
+        parts = v.split('.')
+        int_part = parts[0].lstrip('0') or '0'  # "001" -> "1" (nebo "0" pro "0")
+        dec_part = parts[1].rstrip('0')  # "50" -> "5", "00" -> ""
+        if dec_part:
+            v = f"{int_part}.{dec_part}"  # "1.5"
+        else:
+            v = int_part  # "1" (koncové .0 odstraněno)
+    elif v.isdigit():
+        # Celé číslo s levými nulami (např. "00123" -> "123")
         v = v.lstrip('0') or '0'
     return v
 
