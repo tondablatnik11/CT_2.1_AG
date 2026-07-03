@@ -2,6 +2,7 @@
 Konfigurace pytest a pomocné fixtures pro testy Warehouse Control Tower.
 """
 import sys
+import pytest
 from pathlib import Path
 
 # Přidáme root projektu do PYTHONPATH aby importy fungovaly

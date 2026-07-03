@@ -9,6 +9,7 @@ Poskytuje:
 import functools
 import logging
 import traceback
+import pandas as pd
 import streamlit as st
 from typing import Callable, Any, Optional
 
