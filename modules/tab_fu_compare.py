@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from modules.utils import t, safe_hu, safe_del
+from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
 
 try:
     fast_render = st.fragment
 except AttributeError:
     fast_render = lambda f: f
 
-@fast_render
+@safe_render(fallback_message="⚠️ Chyba při vykreslování Porovnání FU vs SAP")
 def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
     def _t(cs, en): return en if st.session_state.get('lang', 'cs') == 'en' else cs
 

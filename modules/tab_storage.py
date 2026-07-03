@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import re
+from modules.safe_render import ErrorBoundary, safe_render
 
 try:
     fast_render = st.fragment
@@ -42,7 +43,7 @@ def parse_bin_coords(bin_str):
     
     return aisle, stack, level, pos
 
-@fast_render
+@safe_render(fallback_message="⚠️ Chyba při vykreslování Skladu (Storage)")
 def render_storage(df_lx03, df_lt10, df_marm, df_pick):
     st.markdown("<div class='section-header'><h3>🏢 Rídící Věž Skladu (Control Tower)</h3><p>Plný přehled zón, půdorysné mapy (2D Layout), vizualizace frekvence pickování a detekce přesunů/ležáků.</p></div>", unsafe_allow_html=True)
 

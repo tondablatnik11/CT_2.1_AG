@@ -4,18 +4,20 @@ import numpy as np
 import plotly.graph_objects as go
 from modules.utils import t, safe_hu, safe_del
 from database import load_from_db
+from modules.safe_render import ErrorBoundary, validate_dataframe
 
 try:
     fast_render = st.fragment
 except AttributeError:
     fast_render = lambda f: f
 
-# Verze v30 - EXTRÉMNĚ ROBUSTNÍ DETEKCE SLOUPCŮ + DIAGNOSTIKA
+# Verze v31 - Přidána robustní detekce chyb + optimalizace
 @st.cache_data(show_spinner=False)
 def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, voll_set):
+    """Hlavní billing logika - plně deterministická, s error safety."""
     billing_df = pd.DataFrame()
     df_hu_details = pd.DataFrame()
-    if df_vekp is None or df_vekp.empty: 
+    if df_vekp is None or df_vekp.empty:
         return billing_df, df_hu_details
 
     # ---------------------------------------------------------
@@ -426,7 +428,9 @@ def render_reliability_report(df_pick, df_vekp, df_vepo):
     st.divider()
 
 
+@safe_render(fallback_message="⚠️ Chyba při vykreslování Fakturace")
 def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data=None):
+    """Hlavní renderer Billing - obalený v bezpečnostních kontrolách."""
     def _t(cs, en): return en if st.session_state.get('lang', 'cs') == 'en' else cs
 
     st.markdown(f"<div class='section-header'><h3>💰 {_t('Korelace mezi Pickováním a Účtováním', 'Correlation Between Picking and Billing')}</h3><p>{_t('Zákazník platí podle počtu výsledných balících jednotek (HU). Zde vidíte náročnost vytvoření těchto zpoplatněných jednotek napříč fakturačními kategoriemi.', 'The customer pays based on the number of billed HUs. Here you can see the effort required to create these billed units across categories.')}</p></div>", unsafe_allow_html=True)
@@ -437,23 +441,35 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
         del_cols = [c for c, l in zip(df_vekp.columns, cols_lower) if "delivery" in l or "lieferung" in l or "dodávka" in l or "dodavka" in l or "zakázka" in l or "zakazka" in l]
         if not del_cols:
             st.error(f"🚨 **Kritická chyba: Aplikace nedokáže ve vašem VEKP souboru najít sloupec se zakázkou.** \n\nZkuste upravit export ze SAPu, nebo se mi ozvěte. \n\n**Názvy sloupců, které máte ve VEKP teď:** `{list(df_vekp.columns)}`")
-            return
-            
+            return pd.DataFrame()
+
     # 🚨 BEZPEČNOSTNÍ DIAGNOSTIKA VEPO
     if df_vepo is not None and not df_vepo.empty:
         cols_lower_v = [str(c).lower().strip() for c in df_vepo.columns]
         mat_cols = [c for c, l in zip(df_vepo.columns, cols_lower_v) if "material" in l or "materiál" in l]
         if not mat_cols:
             st.error(f"🚨 **Kritická chyba: Aplikace nedokáže ve vašem VEPO souboru najít sloupec pro Materiál.** \n\n**Názvy sloupců, které máte ve VEPO teď:** `{list(df_vepo.columns)}`")
-            return
+            return pd.DataFrame()
 
     with st.spinner("🧠 Analyzuji SAP data (VEKP, VEPO)..."):
-        render_reliability_report(df_pick, df_vekp, df_vepo)
+        try:
+            render_reliability_report(df_pick, df_vekp, df_vepo)
+        except Exception as e:
+            st.warning(f"⚠️ Nedokončena analýza spolehlivosti: {e}")
 
-        voll_set = st.session_state.get('voll_set', set())
-        
-        # Volání cacheované logiky
-        billing_df, df_hu_details = cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, voll_set)
+        voll_set = st.session_state.get('voll_set', set()) or set()
+
+        # Bezpečné volání hlavní logiky s fallbackem
+        try:
+            billing_df, df_hu_details = cached_billing_logic_v28(
+                df_pick, df_vekp, df_vepo, df_cats, queue_count_col, voll_set
+            )
+        except Exception as e:
+            st.error(f"❌ Kritická chyba v Billing Logic: {e}")
+            import traceback
+            with st.expander("🔧 Detaily"):
+                st.code(traceback.format_exc(), language="python")
+            return pd.DataFrame()
 
         # ===============================================
         # APLIKACE FILTRU MĚSÍCE (aby vše sedělo s menu)

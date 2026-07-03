@@ -112,6 +112,7 @@ def prep_packing_data(billing_df, df_oe):
     return valid_time_df, mat_complex, pcs_col, mat_col
 
 
+@safe_render(fallback_message="⚠️ Chyba při vykreslování analýzy balení")
 def render_packing(billing_df, df_oe):
     def _t(cs, en): 
         return en if st.session_state.get('lang', 'cs') == 'en' else cs

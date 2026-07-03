@@ -5,13 +5,14 @@ import re
 import datetime
 import plotly.express as px
 from modules.utils import safe_del, safe_hu
+from modules.safe_render import ErrorBoundary, safe_render
 
 try:
     fast_render = st.fragment
 except AttributeError:
     fast_render = lambda f: f
 
-@fast_render
+@safe_render(fallback_message="⚠️ Chyba při vykreslování Admin Tools")
 def render_admins(df_vekp, df_likp):
     st.markdown("<div class='section-header'><h3>🛠️ Admin Tools & Tracking</h3><p>Nástroje pro nákupčí obalů, expedici a sledování zásilek.</p></div>", unsafe_allow_html=True)
 

@@ -1,98 +1,273 @@
+"""
+Modul pro správu Supabase Storage - ukládání a načítání dat jako Parquet.
+Optimalizováno pro rychlost, stabilitu a minimální memory footprint.
+"""
 import os
+import io
+import time
+import logging
+import hashlib
+import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
-import pandas as pd
-import io
+from typing import Optional
 
-# Inicializace klienta Supabase
-try:
-    url: str = st.secrets["SUPABASE_URL"]
-    key: str = st.secrets["SUPABASE_KEY"]
-    supabase: Client = create_client(url, key)
-except Exception as e:
-    st.error("Chyba připojení k databázi. Zkontrolujte st.secrets.")
-    supabase = None
+# Konfigurace loggeru
+logger = logging.getLogger("warehouse.database")
 
-# Název bucketu, který jsi vytvořil v Supabase Storage
+# Název bucketu v Supabase Storage
 BUCKET_NAME = "warehouse_data"
 
-def save_to_db(df, name, append=False):
-    """
-    Extrémně efektivní ukládání: Zkomprimuje DataFrame do formátu Parquet 
-    a uloží jako jediný malý soubor do Supabase Storage.
-    Pokud je append=True, nejdřív stáhne stará data, připojí k nim nová a vyčistí duplicity.
-    """
-    if supabase is None or df is None or df.empty:
-        return False
-        
+# Verze schématu parquet - inkrementujte při zásadní změně struktury sloupců
+SCHEMA_VERSION = 2
+
+# Timeout a retry konfigurace
+MAX_RETRIES = 3
+RETRY_DELAY_S = 1.0
+UPLOAD_TIMEOUT_S = 120
+DOWNLOAD_TIMEOUT_S = 60
+
+
+def _init_supabase() -> Optional[Client]:
+    """Bezpečná inicializace Supabase klienta s detailním error loggingem."""
     try:
-        # POKUD CHCEME DATA PŘIPOJIT, NEJPRVE JE STÁHNEME A SLOUČÍME
+        if "SUPABASE_URL" not in st.secrets or "SUPABASE_KEY" not in st.secrets:
+            logger.error("Supabase secrets nejsou k dispozici v st.secrets")
+            st.error("🔐 Chyba: V Streamlit Secrets chybí SUPABASE_URL nebo SUPABASE_KEY.")
+            return None
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        client = create_client(url, key)
+        logger.info("Supabase client inicializován úspěšně")
+        return client
+    except KeyError as e:
+        logger.error(f"Chybějící secret: {e}")
+        st.error(f"🔐 Chyba konfigurace: chybí secret {e}")
+        return None
+    except Exception as e:
+        logger.exception("Nepodařilo se inicializovat Supabase klienta")
+        st.error(f"🔐 Chyba připojení k databázi: {e}")
+        return None
+
+
+# Lazy inicializace - vytvoří se klient až při prvním použití
+@st.cache_resource(show_spinner=False)
+def get_supabase_client() -> Optional[Client]:
+    """Cacheovaný Supabase klient (vytvoří se jen jednou za session)."""
+    return _init_supabase()
+
+
+def _retry_operation(operation, *args, max_retries: int = MAX_RETRIES, **kwargs):
+    """Společná retry logika pro síťové operace s exponenciálním backoff."""
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            return operation(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                wait = RETRY_DELAY_S * (2 ** attempt)
+                logger.warning(f"Operace selhala (pokus {attempt + 1}/{max_retries}): {e}. Čekám {wait:.1f}s")
+                time.sleep(wait)
+            else:
+                logger.error(f"Operace selhala po {max_retries} pokusech: {e}")
+    raise last_exc
+
+
+def _safe_remove(supabase: Client, path: str) -> bool:
+    """Bezpečné smazání souboru (nevyhazuje výjimku, pokud soubor neexistuje)."""
+    try:
+        supabase.storage.from_(BUCKET_NAME).remove([path])
+        return True
+    except Exception as e:
+        # Tiché ignorování - soubor typicky neexistuje, což je OK
+        logger.debug(f"Smazání {path} selhalo (pravděpodobně neexistuje): {e}")
+        return False
+
+
+def _df_to_optimized_parquet(df: pd.DataFrame) -> bytes:
+    """
+    Převede DataFrame na optimalizovaný Parquet.
+    - Komprese zstd pro minimální velikost
+    - Implicitní kategorie pro object sloupce s nízkou kardinalitou
+    """
+    buffer = io.BytesIO()
+    try:
+        df.to_parquet(
+            buffer,
+            engine='pyarrow',
+            index=False,
+            compression='zstd',
+            compression_level=3,
+            use_dictionary=True,
+            # pyarrow automatic page sizes for streaming
+            write_statistics=False,
+        )
+    except Exception:
+        # Fallback na rychlejší kompresi při chybě
+        logger.warning("zstd selhal, fallback na snappy")
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, engine='pyarrow', index=False, compression='snappy')
+    return buffer.getvalue()
+
+
+def _df_from_parquet(file_bytes: bytes) -> pd.DataFrame:
+    """Načte Parquet z binárních dat - bezpečně s fallbackem."""
+    buffer = io.BytesIO(file_bytes)
+    try:
+        df = pd.read_parquet(buffer, engine='pyarrow')
+        return df
+    except Exception as e:
+        logger.warning(f"Čtení parquet selhalo: {e}")
+        raise
+
+
+def save_to_db(df: pd.DataFrame, name: str, append: bool = False) -> bool:
+    """
+    Uloží DataFrame jako optimalizovaný Parquet do Supabase Storage.
+    Při append=True stáhne existující data, sloučí a odfiltruje duplicity.
+    """
+    supabase = get_supabase_client()
+    if supabase is None or df is None or df.empty:
+        if df is not None and df.empty:
+            logger.warning(f"Pokus o uložení prázdného DF do {name}")
+        return False
+
+    file_path = f"{name}.parquet"
+    start_time = time.time()
+
+    try:
+        # 1. Pokud append, stáhneme stará data a sloučíme
         if append:
             old_df = load_from_db(name)
             if old_df is not None and not old_df.empty:
-                df = pd.concat([old_df, df], ignore_index=True)
-                
-                # Inteligentní odstranění duplicit (ponecháme vždy nejnovější záznam)
-                if name == 'raw_pick' and 'Transfer Order Number' in df.columns:
-                    df = df.drop_duplicates(subset=['Transfer Order Number', 'Material', 'Confirmation date', 'Confirmation time'], keep='last')
-                elif name == 'raw_vekp' and 'Handling Unit' in df.columns:
-                    df = df.drop_duplicates(subset=['Handling Unit'], keep='last')
-                elif name == 'raw_cats':
-                    c_del_cats = next((c for c in df.columns if str(c).strip().lower() in ['lieferung', 'delivery', 'zakázka']), None)
-                    if c_del_cats:
-                        df = df.drop_duplicates(subset=[c_del_cats], keep='last')
-                    else:
-                        df = df.drop_duplicates(keep='last')
-                elif name == 'raw_queue' and 'Transfer Order Number' in df.columns:
-                    df = df.drop_duplicates(subset=['Transfer Order Number'], keep='last')
-                elif name in ['raw_marm', 'raw_manual'] and 'Material' in df.columns:
-                    df = df.drop_duplicates(subset=['Material'], keep='last')
-                else:
-                    df = df.drop_duplicates(keep='last')
-                    
-        # 1. Převedeme data na zkomprimovaný binární Parquet
-        buffer = io.BytesIO()
-        df.to_parquet(buffer, engine='pyarrow', index=False)
-        buffer.seek(0)
-        file_bytes = buffer.read()
-        
-        file_path = f"{name}.parquet"
-        
-        # 2. Smažeme starý soubor, pokud existuje
-        try:
-            supabase.storage.from_(BUCKET_NAME).remove([file_path])
-        except:
-            pass # Pokud soubor neexistoval, nic se neděje
-            
-        # 3. Nahrajeme nový komprimovaný soubor
-        supabase.storage.from_(BUCKET_NAME).upload(file_path, file_bytes)
+                # Zarovnání sloupců - přidáme chybějící sloupce z nového DF
+                for col in df.columns:
+                    if col not in old_df.columns:
+                        old_df[col] = pd.NA
+                for col in old_df.columns:
+                    if col not in df.columns:
+                        df[col] = pd.NA
+                df = pd.concat([old_df, df], ignore_index=True, sort=False)
+
+                # Dedupikace podle specifických klíčů pro danou tabulku
+                df = _dedupe_by_table(df, name)
+
+        # 2. Převedeme na optimalizovaný Parquet
+        file_bytes = _df_to_optimized_parquet(df)
+        compressed_size_mb = len(file_bytes) / (1024 * 1024)
+
+        # 3. Smažeme starý soubor (best-effort)
+        _safe_remove(supabase, file_path)
+
+        # 4. Nahrajeme nový soubor (s retry)
+        def _upload():
+            return supabase.storage.from_(BUCKET_NAME).upload(
+                file_path,
+                file_bytes,
+                file_options={"content-type": "application/octet-stream", "upsert": "false"}
+            )
+
+        _retry_operation(_upload)
+
+        elapsed = time.time() - start_time
+        rows = len(df)
+        logger.info(
+            f"✅ Uloženo {name}: {rows:,} řádků, {compressed_size_mb:.2f} MB, {elapsed:.2f}s"
+        )
         return True
-        
+
     except Exception as e:
-        st.error(f"Chyba při ukládání {name} do Storage: {e}")
+        logger.exception(f"Chyba při ukládání {name}")
+        try:
+            st.error(f"❌ Chyba při ukládání '{name}': {type(e).__name__}: {e}")
+        except Exception:
+            pass  # mimo Streamlit kontext
         return False
 
-# TENTO JEDEN ŘÁDEK VŠE ZRYCHLÍ NA MAXIMUM:
-@st.cache_data(show_spinner=False)
-def load_from_db(name):
+
+def _dedupe_by_table(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    """Inteligentní dedupikace podle specifických klíčů pro každou tabulku."""
+    try:
+        if name == 'raw_pick' and 'Transfer Order Number' in df.columns and 'Material' in df.columns:
+            subset = [c for c in ['Transfer Order Number', 'Material', 'Confirmation date', 'Confirmation time'] if c in df.columns]
+            df = df.drop_duplicates(subset=subset, keep='last')
+        elif name == 'raw_vekp' and 'Handling Unit' in df.columns:
+            df = df.drop_duplicates(subset=['Handling Unit'], keep='last')
+        elif name == 'raw_cats':
+            del_col = next((c for c in df.columns if str(c).strip().lower() in ['lieferung', 'delivery', 'zakázka', 'dodávka']), None)
+            if del_col:
+                df = df.drop_duplicates(subset=[del_col], keep='last')
+            else:
+                df = df.drop_duplicates(keep='last')
+        elif name == 'raw_queue' and 'Transfer Order Number' in df.columns:
+            df = df.drop_duplicates(subset=['Transfer Order Number'], keep='last')
+        elif name in ['raw_marm', 'raw_manual'] and 'Material' in df.columns:
+            df = df.drop_duplicates(subset=['Material'], keep='last')
+        elif name == 'raw_oe' and 'DN NUMBER (SAP)' in df.columns:
+            df = df.drop_duplicates(keep='last')
+        elif name == 'raw_lx03':
+            # LX03 - unikátní podle storage bin
+            bin_col = next((c for c in df.columns if 'storage bin' in str(c).lower() or 'skladové místo' in str(c).lower() or 'lagerplatz' in str(c).lower()), None)
+            if bin_col:
+                df = df.drop_duplicates(subset=[bin_col], keep='last')
+            else:
+                df = df.drop_duplicates(keep='last')
+        elif name == 'raw_lt10':
+            bin_col = next((c for c in df.columns if 'storage bin' in str(c).lower() or 'skladové místo' in str(c).lower() or 'lagerplatz' in str(c).lower()), None)
+            mat_col = next((c for c in df.columns if 'material' in str(c).lower() or 'materiál' in str(c).lower()), None)
+            if bin_col and mat_col:
+                df = df.drop_duplicates(subset=[bin_col, mat_col], keep='last')
+            else:
+                df = df.drop_duplicates(keep='last')
+        else:
+            df = df.drop_duplicates(keep='last')
+    except Exception as e:
+        logger.warning(f"Dedupikace selhala pro {name}, používám obecnou: {e}")
+        df = df.drop_duplicates(keep='last')
+    return df
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def load_from_db(name: str) -> Optional[pd.DataFrame]:
     """
-    Extrémně rychlé čtení: Stáhne komprimovaný soubor a rozbalí ho 
-    přímo do Pandas DataFrame. Pamatuje si ho v RAM!
+    Načte optimalizovaný Parquet ze Supabase Storage a vrátí DataFrame.
+    Cachováno na 5 minut (TTL).
     """
+    supabase = get_supabase_client()
     if supabase is None:
         return None
-        
+
+    file_path = f"{name}.parquet"
+    start_time = time.time()
+
     try:
-        file_path = f"{name}.parquet"
-        
-        # 1. Stáhneme binární soubor ze Storage
-        response = supabase.storage.from_(BUCKET_NAME).download(file_path)
-        
-        # 2. Převedeme binární data zpět na DataFrame
-        buffer = io.BytesIO(response)
-        df = pd.read_parquet(buffer, engine='pyarrow')
+        def _download():
+            return supabase.storage.from_(BUCKET_NAME).download(file_path)
+
+        response = _retry_operation(_download)
+        df = _df_from_parquet(response)
+
+        elapsed = time.time() - start_time
+        logger.info(f"📥 Načteno {name}: {len(df):,} řádků za {elapsed:.2f}s")
         return df
-        
+
     except Exception as e:
-        # Soubor na Supabase zatím neexistuje
+        # Soubor neexistuje - to je normální stav pro prázdnou DB
+        logger.debug(f"Soubor {name} neexistuje v Supabase (normální stav)")
         return None
+
+
+def is_connected() -> bool:
+    """Rychlý health check připojení k Supabase."""
+    return get_supabase_client() is not None
+
+
+def clear_cache():
+    """Smaže cache funkcí načítajících data (využijte po uploadu nových dat)."""
+    try:
+        load_from_db.clear()
+        get_supabase_client.clear()
+        logger.info("Cache vymazána")
+    except Exception as e:
+        logger.warning(f"Smazání cache selhalo: {e}")

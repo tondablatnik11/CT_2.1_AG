@@ -3,13 +3,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from modules.utils import t
+from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
 
 try:
     fast_render = st.fragment
 except AttributeError:
     fast_render = lambda f: f
 
-@fast_render
+@safe_render(fallback_message="⚠️ Chyba při vykreslování Nástěnky")
 def render_board(df_pick, billing_df):
     st.markdown("<div class='section-header'><h3>🖨️ Nástěnka (Grafy připravené k tisku)</h3><p>Tyto grafy mají speciálně upravený kontrast a bílé pozadí, aby po vytištění na papír a vyvěšení na nástěnku vypadaly co nejlépe.</p></div>", unsafe_allow_html=True)
 

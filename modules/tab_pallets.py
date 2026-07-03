@@ -3,7 +3,9 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from modules.utils import t
+from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
 
+@safe_render(fallback_message="⚠️ Chyba při vykreslování Paletových zakázek")
 def render_pallets(df_pick):
     # Chytrý lokální překladač pro tuto záložku
     def _t(cs, en): 

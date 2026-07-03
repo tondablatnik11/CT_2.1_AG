@@ -1,570 +1,1258 @@
+"""
+Warehouse Control Tower - Hlavní aplikace (Streamlit + Supabase)
+
+Hlavní entry point pro end-to-end skladovou analytiku.
+- Načítá data ze Supabase Storage (Parquet)
+- Počítá fyzické pohyby, fakturaci, efektivitu
+- Vykresluje dashboardy přes 13 specializovaných záložek
+
+Architektura:
+    app.py (tento soubor)
+        ├── database.py       - Supabase storage operace
+        └── modules/
+            ├── utils.py          - výpočetní jádro, helpers
+            ├── safe_render.py    - error handling
+            └── tab_*.py          - jednotlivé záložky
+"""
+import os
+import re
+import io
+import time
+import logging
 import streamlit as st
 import pandas as pd
 import numpy as np
-import io
-import time
-import re
 from streamlit_option_menu import option_menu
 
-from database import save_to_db, load_from_db
-from modules.utils import t, fast_compute_moves, get_match_key_vectorized, get_match_key, parse_packing_time, BOX_UNITS, detect_vollpalettes, safe_hu, safe_del
-
-# <-- Zde už nejsou žádné importy z modules/tab_ kromě těch nezbytných pro start. Plně Lazy-Loaded aplikace!
+from database import save_to_db, load_from_db, get_supabase_client, clear_cache
+from modules.utils import (
+    t, fast_compute_moves, get_match_key_vectorized, get_match_key,
+    parse_packing_time, BOX_UNITS, detect_vollpalettes, safe_hu, safe_del,
+    optimize_dataframe_dtypes, CHART_LAYOUT, CHART_COLORS
+)
+from modules.safe_render import safe_render, ErrorBoundary, validate_dataframe
 
 # ==========================================
-# 1. NASTAVENÍ STRÁNKY A UNIVERZÁLNÍ SAAS DESIGN
+# LOGGING CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Warehouse Control Tower", page_icon="🚀", layout="wide", initial_sidebar_state="expanded")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(name)s | %(levelname)s | %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger("warehouse.app")
 
+# ==========================================
+# PAGE CONFIGURATION & GLOBAL STYLES
+# ==========================================
+st.set_page_config(
+    page_title="Warehouse Control Tower",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Prémiový CSS - Modern Dark Glassmorphism (2026 Edition)
 st.markdown("""
-    <style>
-    /* Načtení prémiového fontu Plus Jakarta Sans */
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Plus Jakarta Sans', -apple-system, sans-serif !important;
-    }
-    
-    /* 2026 Glassmorphism & Modern Dark/Neon Aesthetics */
-    .stApp {
-        background-color: #0d0f14;
-        background-image: 
-            radial-gradient(ellipse at top left, rgba(59, 130, 246, 0.15), transparent 50%),
-            radial-gradient(ellipse at bottom right, rgba(16, 185, 129, 0.1), transparent 50%);
-        color: #e2e8f0;
-    }
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
-    /* Tabular-nums pro perfektní zarovnání cifer pod sebou */
-    [data-testid="stMetricValue"], .tabular-nums {
-        font-variant-numeric: tabular-nums;
-        letter-spacing: -0.02em;
-    }
-    
-    /* Vylepšení metrik - Glassmorphism "Karty" */
-    [data-testid="stMetric"] {
-        background: rgba(30, 41, 59, 0.45);
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 16px;
-        padding: 24px;
-        box-shadow: 0 4px 24px -1px rgba(0, 0, 0, 0.2);
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-    [data-testid="stMetric"]:hover {
-        transform: translateY(-4px) scale(1.02);
-        border-color: rgba(59, 130, 246, 0.5);
-        box-shadow: 0 12px 32px -4px rgba(59, 130, 246, 0.3);
-        background: rgba(30, 41, 59, 0.65);
-    }
-    [data-testid="stMetricLabel"] {
-        font-weight: 600;
-        opacity: 0.7;
-        font-size: 13px;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        color: #94a3b8;
-    }
-    [data-testid="stMetricValue"] {
-        font-weight: 800;
-        font-size: 32px !important;
-        background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
+html, body, [class*="css"] {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-feature-settings: 'cv11', 'ss01';
+}
 
-    /* Hero Metric - Speciální kontejner pro hlavní KPI */
-    .hero-metric {
-        background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(37, 99, 235, 0.0) 100%);
-        border: 1px solid rgba(59, 130, 246, 0.3);
-        border-left: 5px solid #3b82f6;
-        backdrop-filter: blur(12px);
-        border-radius: 12px;
-        padding: 24px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-    }
-    .hero-metric h2 { margin: 0; font-size: 14px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; }
-    .hero-metric h1 { margin: 8px 0 0 0; font-size: 46px; font-weight: 800; color: #60a5fa; font-variant-numeric: tabular-nums; text-shadow: 0 0 20px rgba(59, 130, 246, 0.3);}
-    
-    /* Zkrášlení záložek (Tabs) - Neon lines */
-    [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
-    [data-baseweb="tab"] {
-        background: rgba(30, 41, 59, 0.3);
-        backdrop-filter: blur(8px);
-        border-radius: 8px 8px 0px 0px;
-        padding: 12px 24px; 
-        font-weight: 600;
-        border: 1px solid rgba(255, 255, 255, 0.05); 
-        border-bottom: none;
-        transition: all 0.2s ease;
-    }
-    [aria-selected="true"] {
-        background: rgba(59, 130, 246, 0.1) !important;
-        border-top: 3px solid #3b82f6 !important;
-        color: #60a5fa !important;
-        text-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
-    }
-    
-    .section-header {
-        background: linear-gradient(90deg, rgba(30,41,59,0.7) 0%, rgba(15,23,42,0) 100%);
-        border-left: 4px solid #3b82f6;
-        padding: 16px 24px; 
-        border-radius: 8px;
-        margin-bottom: 24px; 
-        box-shadow: 0 4px 20px rgba(0,0,0,0.1);
-    }
-    .section-header h3 { margin-top: 0; padding-top: 0; color: #f8fafc; font-weight: 700; text-shadow: 0 2px 4px rgba(0,0,0,0.5); }
-    .section-header p { margin-bottom: 0; opacity: 0.8; font-size: 14px; color: #cbd5e1; }
-    
-    #MainMenu {visibility: hidden;}
-    header {background: transparent !important;}
-    [data-testid="stHeaderActionElements"] {display: none;}
-    </style>
+/* === HLAVNÍ POZADÍ S GRADIENTEM === */
+.stApp {
+    background-color: #0d0f14;
+    background-image:
+        radial-gradient(ellipse at top left, rgba(59, 130, 246, 0.15), transparent 50%),
+        radial-gradient(ellipse at bottom right, rgba(16, 185, 129, 0.10), transparent 50%),
+        radial-gradient(ellipse at center, rgba(139, 92, 246, 0.05), transparent 70%);
+    color: #e2e8f0;
+}
+
+/* === TABULAR NUMS PRO METRIKY === */
+[data-testid="stMetricValue"], .tabular-nums {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+}
+
+/* === GLASSMORPHISM KARTY PRO METRIKY === */
+[data-testid="stMetric"] {
+    background: rgba(30, 41, 59, 0.45);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 20px 24px;
+    box-shadow: 0 4px 24px -1px rgba(0, 0, 0, 0.2);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+[data-testid="stMetric"]:hover {
+    transform: translateY(-3px) scale(1.01);
+    border-color: rgba(59, 130, 246, 0.5);
+    box-shadow: 0 12px 32px -4px rgba(59, 130, 246, 0.3);
+    background: rgba(30, 41, 59, 0.65);
+}
+[data-testid="stMetricLabel"] {
+    font-weight: 600;
+    opacity: 0.7;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #94a3b8;
+}
+[data-testid="stMetricValue"] {
+    font-weight: 800;
+    font-size: 28px !important;
+    background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+/* === HERO METRICKÝ KONTEJNER === */
+.hero-metric {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(37, 99, 235, 0.0) 100%);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-left: 5px solid #3b82f6;
+    backdrop-filter: blur(12px);
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+.hero-metric h2 { margin: 0; font-size: 14px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; }
+.hero-metric h1 { margin: 8px 0 0 0; font-size: 46px; font-weight: 800; color: #60a5fa; font-variant-numeric: tabular-nums; text-shadow: 0 0 20px rgba(59, 130, 246, 0.3);}
+
+/* === TABS - NEON LINES === */
+[data-baseweb="tab-list"] { gap: 8px; background-color: transparent; padding: 4px; }
+[data-baseweb="tab"] {
+    background: rgba(30, 41, 59, 0.3);
+    backdrop-filter: blur(8px);
+    border-radius: 8px 8px 0px 0px;
+    padding: 12px 24px;
+    font-weight: 600;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: none;
+    transition: all 0.2s ease;
+}
+[data-baseweb="tab"]:hover {
+    background: rgba(30, 41, 59, 0.5);
+    border-color: rgba(59, 130, 246, 0.3);
+}
+[aria-selected="true"] {
+    background: rgba(59, 130, 246, 0.1) !important;
+    border-top: 3px solid #3b82f6 !important;
+    color: #60a5fa !important;
+    text-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+}
+
+/* === SECTION HEADERS === */
+.section-header {
+    background: linear-gradient(90deg, rgba(30,41,59,0.7) 0%, rgba(15,23,42,0) 100%);
+    border-left: 4px solid #3b82f6;
+    padding: 16px 24px;
+    border-radius: 8px;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+}
+.section-header h3 {
+    margin-top: 0;
+    padding-top: 0;
+    color: #f8fafc;
+    font-weight: 700;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    font-size: 22px;
+}
+.section-header p {
+    margin-bottom: 0;
+    opacity: 0.85;
+    font-size: 14px;
+    color: #cbd5e1;
+    line-height: 1.5;
+}
+
+/* === HLAVNÍ HLAVIČKA === */
+.main-header {
+    font-size: 42px;
+    font-weight: 800;
+    background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 50%, #10b981 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 4px;
+    letter-spacing: -0.02em;
+}
+.sub-header {
+    font-size: 15px;
+    color: #94a3b8;
+    margin-bottom: 24px;
+    opacity: 0.9;
+}
+
+/* === CONTAINERS === */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 12px;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* === SKRÝT DEFAULT UI === */
+#MainMenu {visibility: hidden;}
+header {background: transparent !important;}
+[data-testid="stHeaderActionElements"] {display: none;}
+footer {visibility: hidden;}
+
+/* === LOADING SPINNER === */
+.stSpinner > div { border-top-color: #3b82f6 !important; }
+
+/* === DATAFRAME STYLING === */
+[data-testid="stDataFrame"] {
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+/* === TOASTY === */
+.stToast {
+    background: rgba(30, 41, 59, 0.95) !important;
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(59, 130, 246, 0.3) !important;
+}
+
+/* === LOADING STATES - SKELETON === */
+@keyframes skeleton-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 0.8; }
+}
+.skeleton {
+    background: linear-gradient(90deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.15) 50%, rgba(255,255,255,0.05) 100%);
+    background-size: 200% 100%;
+    animation: skeleton-pulse 1.5s ease-in-out infinite;
+    border-radius: 8px;
+    height: 24px;
+    margin-bottom: 8px;
+}
+
+/* === SCROLLBAR === */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.3);
+    border-radius: 5px;
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(59, 130, 246, 0.5);
+    border-radius: 5px;
+    transition: all 0.2s;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(59, 130, 246, 0.8);
+}
+
+/* === BUDGET BADGES === */
+.badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+.badge-success { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+.badge-warning { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+.badge-error { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+.badge-info { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+
+/* === PŘEPÍNAČ JAZYKA === */
+.lang-button {
+    background: rgba(30, 41, 59, 0.5) !important;
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    transition: all 0.2s !important;
+}
+.lang-button:hover {
+    background: rgba(59, 130, 246, 0.2) !important;
+    border-color: rgba(59, 130, 246, 0.5) !important;
+}
+
+/* === EXPANDER POLISH === */
+.streamlit-expanderHeader {
+    background: rgba(30, 41, 59, 0.4) !important;
+    backdrop-filter: blur(8px);
+    border-radius: 8px !important;
+    border: 1px solid rgba(255, 255, 255, 0.06) !important;
+    font-weight: 600 !important;
+}
+.streamlit-expanderHeader:hover {
+    border-color: rgba(59, 130, 246, 0.3) !important;
+}
+
+/* === ALERTS === */
+.stAlert {
+    border-radius: 12px !important;
+    border-left: 4px solid !important;
+    backdrop-filter: blur(8px);
+}
+[data-baseweb="notification"] {
+    border-radius: 12px;
+}
+</style>
 """, unsafe_allow_html=True)
 
-if 'lang' not in st.session_state: st.session_state.lang = 'cs'
 
-def _t(cs, en): 
+# ==========================================
+# SESSION STATE INITIALIZATION
+# ==========================================
+if 'lang' not in st.session_state:
+    st.session_state.lang = 'cs'
+if 'app_initialized' not in st.session_state:
+    st.session_state.app_initialized = True
+    logger.info("Aplikace inicializována")
+
+
+def _t(cs: str, en: str) -> str:
+    """Lokální helper pro překlad v app.py."""
     return en if st.session_state.get('lang', 'cs') == 'en' else cs
 
-# ==========================================
-# 2. LOGIKA NAČÍTÁNÍ A PŘÍPRAVY DAT
-# ==========================================
-@st.cache_data(show_spinner=False)
-def fetch_and_prep_data(use_marm=True):
-    df_pick_raw = load_from_db('raw_pick')
-    if df_pick_raw is None or df_pick_raw.empty: return None
 
+# ==========================================
+# HLAVNÍ DATA PIPELINE - OPTIMALIZOVANÝ
+# ==========================================
+
+@st.cache_data(show_spinner=False, ttl=300)
+def fetch_and_prep_data(use_marm: bool = True):
+    """
+    Centrální pipeline pro načtení a přípravu dat.
+    Cachuje se na 5 minut - nemusí se volat znovu při každém rerun.
+    """
+    start_time = time.time()
+    logger.info(f"fetch_and_prep_data start (use_marm={use_marm})")
+
+    # 1) Načtení základního pick reportu (povinný)
+    df_pick_raw = load_from_db('raw_pick')
+    if df_pick_raw is None or df_pick_raw.empty:
+        logger.warning("raw_pick je prázdný - databáze neinicializovaná")
+        return None
+
+    # 2) Paralelní načítání vedlejších tabulek (sekvenčně, ale rychle - cached)
     df_marm_raw = load_from_db('raw_marm') if use_marm else None
     df_queue_raw = load_from_db('raw_queue')
     df_manual_raw = load_from_db('raw_manual')
 
+    # 3) Příprava a čištění pick dat
     df_pick = df_pick_raw.copy()
-    df_pick['Delivery'] = df_pick['Delivery'].astype(str).str.strip().replace(to_replace=['nan', 'NaN', 'None', 'none', ''], value=np.nan)
-    df_pick['Material'] = df_pick['Material'].astype(str).str.strip().replace(to_replace=['nan', 'NaN', 'None', 'none', ''], value=np.nan)
+    df_pick['Delivery'] = (
+        df_pick['Delivery'].astype(str).str.strip()
+        .replace(to_replace=['nan', 'NaN', 'None', 'none', ''], value=np.nan)
+    )
+    df_pick['Material'] = (
+        df_pick['Material'].astype(str).str.strip()
+        .replace(to_replace=['nan', 'NaN', 'None', 'none', ''], value=np.nan)
+    )
+
+    # DŮLEŽITÉ: Aplikuj dtype optimalizaci na klíčové sloupce PŘED dropna
+    # (category sloupce jsou 10x rychlejší v operacích než object)
+    for col in ['Delivery', 'Material', 'User', 'Queue']:
+        if col in df_pick.columns and df_pick[col].dtype == 'object':
+            try:
+                df_pick[col] = df_pick[col].astype('category')
+            except (TypeError, ValueError):
+                pass
+
     df_pick = df_pick.dropna(subset=['Delivery', 'Material']).copy()
-    
+    initial_rows = len(df_pick)
+
+    # 4) Filtrování admin účtů
     num_removed_admins = 0
     if 'User' in df_pick.columns:
-        mask_admins = df_pick['User'].isin(['UIDJ5089', 'UIH25501'])
+        admin_users = ['UIDJ5089', 'UIH25501']
+        # Při kategorii .isin() je mnohem rychlejší
+        mask_admins = df_pick['User'].astype(str).isin(admin_users)
         num_removed_admins = int(mask_admins.sum())
-        df_pick = df_pick[~mask_admins].copy()
+        if num_removed_admins > 0:
+            df_pick = df_pick[~mask_admins].copy()
 
-    df_pick['Match_Key'] = get_match_key_vectorized(df_pick['Material'])
-    df_pick['Qty'] = pd.to_numeric(df_pick['Act.qty (dest)'], errors='coerce').fillna(0)
-    df_pick['Source Storage Bin'] = df_pick.get('Source Storage Bin', df_pick.get('Storage Bin', '')).fillna('').astype(str)
-    df_pick['Removal of total SU'] = df_pick.get('Removal of total SU', '').fillna('').astype(str).str.strip().str.upper()
-    df_pick['Date'] = pd.to_datetime(df_pick.get('Confirmation date', df_pick.get('Confirmation Date')), errors='coerce')
-    
+    # 5) Vektorová příprava klíčů a sloupců
+    df_pick['Match_Key'] = get_match_key_vectorized(df_pick['Material'].astype(str))
+    df_pick['Qty'] = pd.to_numeric(df_pick['Act.qty (dest)'], errors='coerce').fillna(0).astype('float32')
+
+    bin_col = 'Source Storage Bin' if 'Source Storage Bin' in df_pick.columns else 'Storage Bin'
+    df_pick['Source Storage Bin'] = df_pick.get(bin_col, pd.Series(dtype=str)).fillna('').astype(str)
+
+    df_pick['Removal of total SU'] = (
+        df_pick.get('Removal of total SU', pd.Series(dtype=str))
+        .fillna('').astype(str).str.strip().str.upper()
+    )
+
+    # Datum - konverze na skutečné datetime64 pro rychlé porovnání
+    date_src = df_pick.get('Confirmation date', df_pick.get('Confirmation Date'))
+    df_pick['Date'] = pd.to_datetime(date_src, errors='coerce')
+
+    # 6) Mapování front (Queue)
     queue_count_col = 'Delivery'
     df_pick['Queue'] = 'N/A'
     if df_queue_raw is not None and not df_queue_raw.empty:
         if 'Transfer Order Number' in df_pick.columns and 'Transfer Order Number' in df_queue_raw.columns:
-            q_map = df_queue_raw.dropna(subset=['Transfer Order Number', 'Queue']).drop_duplicates('Transfer Order Number').set_index('Transfer Order Number')['Queue'].to_dict()
+            q_map = (
+                df_queue_raw.dropna(subset=['Transfer Order Number', 'Queue'])
+                .drop_duplicates('Transfer Order Number')
+                .set_index('Transfer Order Number')['Queue'].to_dict()
+            )
             df_pick['Queue'] = df_pick['Transfer Order Number'].map(q_map).fillna('N/A')
             queue_count_col = 'Transfer Order Number'
+
+            # Přenos dat z queue tabulky (pokud chybí datum v pick)
             for d_col in ['Confirmation Date', 'Creation Date']:
                 if d_col in df_queue_raw.columns:
-                    d_map = df_queue_raw.dropna(subset=['Transfer Order Number', d_col]).drop_duplicates('Transfer Order Number').set_index('Transfer Order Number')[d_col].to_dict()
+                    d_map = (
+                        df_queue_raw.dropna(subset=['Transfer Order Number', d_col])
+                        .drop_duplicates('Transfer Order Number')
+                        .set_index('Transfer Order Number')[d_col].to_dict()
+                    )
                     to_dates = df_pick['Transfer Order Number'].map(d_map)
                     df_pick['Date'] = df_pick['Date'].fillna(pd.to_datetime(to_dates, errors='coerce'))
                     break
         elif 'SD Document' in df_queue_raw.columns:
-            q_map = df_queue_raw.dropna(subset=['SD Document', 'Queue']).drop_duplicates('SD Document').set_index('SD Document')['Queue'].to_dict()
+            q_map = (
+                df_queue_raw.dropna(subset=['SD Document', 'Queue'])
+                .drop_duplicates('SD Document')
+                .set_index('SD Document')['Queue'].to_dict()
+            )
             df_pick['Queue'] = df_pick['Delivery'].map(q_map).fillna('N/A')
-        df_pick = df_pick[df_pick['Queue'].astype(str).str.upper() != 'CLEARANCE'].copy()
 
-    manual_boxes = {}
+        # Filtr CLEARANCE front
+        if 'Queue' in df_pick.columns:
+            df_pick = df_pick[df_pick['Queue'].astype(str).str.upper() != 'CLEARANCE'].copy()
+
+    # 7) Manuální master data (krabice pro materiály)
+    manual_boxes: Dict[str, Tuple[int, ...]] = {}
     if df_manual_raw is not None and not df_manual_raw.empty:
-        c_mat, c_pkg = df_manual_raw.columns[0], df_manual_raw.columns[1]
-        for _, row in df_manual_raw.iterrows():
-            raw_mat = str(row[c_mat])
-            if raw_mat.upper() in ['NAN', 'NONE', '']: continue
-            mat_key = get_match_key(raw_mat)
-            pkg = str(row[c_pkg])
-            nums = re.findall(r'\bK-(\d+)ks?\b|(\d+)\s*ks\b|balen[íi]\s+po\s+(\d+)|krabice\s+(?:po\s+)?(\d+)|(?:role|pytl[íi]k|pytel)[^\d]*(\d+)', pkg, flags=re.IGNORECASE)
-            ext = tuple(sorted(list(set([int(g) for m in nums for g in m if g])), reverse=True))
-            if not ext and re.search(r'po\s*kusech', pkg, re.IGNORECASE): ext = (1,)
-            if ext: manual_boxes[mat_key] = ext
+        try:
+            c_mat, c_pkg = df_manual_raw.columns[0], df_manual_raw.columns[1]
+            # Vektorové parsování pro velké datasety
+            pkgs = df_manual_raw[c_pkg].astype(str).fillna('')
+            mat_keys = df_manual_raw[c_mat].astype(str).apply(get_match_key)
 
-    box_dict, weight_dict, dim_dict = {}, {} , {}
+            for mat_key, pkg in zip(mat_keys, pkgs):
+                if not mat_key or mat_key in ('NAN', 'NONE', '0'):
+                    continue
+                nums = re.findall(
+                    r'\bK-(\d+)ks?\b|(\d+)\s*ks\b|balen[íi]\s+po\s+(\d+)|krabice\s+(?:po\s+)?(\d+)|(?:role|pytl[íi]k|pytel)[^\d]*(\d+)',
+                    pkg, flags=re.IGNORECASE
+                )
+                ext = tuple(sorted(set(int(g) for m in nums for g in m if g), reverse=True))
+                if not ext and re.search(r'po\s*kusech', pkg, re.IGNORECASE):
+                    ext = (1,)
+                if ext:
+                    manual_boxes[mat_key] = ext
+        except Exception as e:
+            logger.warning(f"Chyba při parsování manual boxes: {e}")
+
+    # 8) MARM master data - vektorová příprava
+    box_dict: Dict[str, Tuple[int, ...]] = {}
+    weight_dict: Dict[str, float] = {}
+    dim_dict: Dict[str, float] = {}
     if df_marm_raw is not None and not df_marm_raw.empty:
-        df_marm_raw['Match_Key'] = get_match_key_vectorized(df_marm_raw['Material'])
-        df_boxes = df_marm_raw[df_marm_raw['Alternative Unit of Measure'].isin(BOX_UNITS)].copy()
-        df_boxes['Numerator'] = pd.to_numeric(df_boxes['Numerator'], errors='coerce').fillna(0)
-        box_dict = df_boxes.groupby('Match_Key')['Numerator'].apply(lambda g: tuple(sorted([int(x) for x in g if x > 1], reverse=True))).to_dict()
+        try:
+            df_marm_raw = df_marm_raw.copy()
+            df_marm_raw['Match_Key'] = get_match_key_vectorized(df_marm_raw['Material'].astype(str))
 
-        df_st = df_marm_raw[df_marm_raw['Alternative Unit of Measure'].isin(['ST', 'PCE', 'KS', 'EA', 'PC'])].copy()
-        df_st['Gross Weight'] = pd.to_numeric(df_st['Gross Weight'], errors='coerce').fillna(0)
-        df_st['Weight_KG'] = np.where(df_st['Unit of Weight'].astype(str).str.upper() == 'G', df_st['Gross Weight'] / 1000.0, df_st['Gross Weight'])
-        weight_dict = df_st.groupby('Match_Key')['Weight_KG'].first().to_dict()
+            # Krabice
+            df_boxes = df_marm_raw[df_marm_raw['Alternative Unit of Measure'].isin(BOX_UNITS)].copy()
+            if not df_boxes.empty:
+                df_boxes['Numerator'] = pd.to_numeric(df_boxes['Numerator'], errors='coerce').fillna(0)
+                # groupby + sorted set je rychlejší než apply s lambda
+                box_dict = (
+                    df_boxes[df_boxes['Numerator'] > 1]
+                    .groupby('Match_Key')['Numerator']
+                    .apply(lambda g: tuple(sorted(g.astype(int).tolist(), reverse=True)))
+                    .to_dict()
+                )
 
-        def to_cm(val, unit):
-            try:
-                v = float(val); u = str(unit).upper().strip()
-                return v / 10.0 if u == 'MM' else v * 100.0 if u == 'M' else v
-            except: return 0.0
+            # Kusy (ST, PCE, KS...)
+            df_st = df_marm_raw[df_marm_raw['Alternative Unit of Measure'].isin(['ST', 'PCE', 'KS', 'EA', 'PC'])].copy()
+            if not df_st.empty:
+                df_st['Gross Weight'] = pd.to_numeric(df_st['Gross Weight'], errors='coerce').fillna(0)
+                # Vektorová konverze G -> KG
+                is_gram = df_st['Unit of Weight'].astype(str).str.upper() == 'G'
+                df_st['Weight_KG'] = np.where(is_gram, df_st['Gross Weight'] / 1000.0, df_st['Gross Weight']).astype('float32')
+                weight_dict = df_st.groupby('Match_Key')['Weight_KG'].first().to_dict()
 
-        for dim_col, short in [('Length', 'L'), ('Width', 'W'), ('Height', 'H')]:
-            if dim_col in df_st.columns: df_st[short] = df_st.apply(lambda r, dc=dim_col: to_cm(r[dc], r.get('Unit of Dimension', 'CM')), axis=1)
-            else: df_st[short] = 0.0
-        dim_dict = df_st.set_index('Match_Key')[['L', 'W', 'H']].max(axis=1).to_dict()
+                # Rozměry - vektorový výpočet
+                def _to_cm_vec(arr, units):
+                    v = pd.to_numeric(arr, errors='coerce').fillna(0).astype('float32')
+                    u = units.astype(str).str.upper().str.strip()
+                    return np.where(u == 'MM', v / 10.0, np.where(u == 'M', v * 100.0, v))
 
-    df_pick['Box_Sizes_List'] = df_pick['Match_Key'].apply(lambda m: manual_boxes.get(m, box_dict.get(m, ())))
+                for dim_col, short in [('Length', 'L'), ('Width', 'W'), ('Height', 'H')]:
+                    if dim_col in df_st.columns:
+                        unit_col = df_st.get('Unit of Dimension', pd.Series(['CM'] * len(df_st)))
+                        df_st[short] = _to_cm_vec(df_st[dim_col], unit_col)
+                    else:
+                        df_st[short] = 0.0
+                dim_dict = df_st.set_index('Match_Key')[['L', 'W', 'H']].max(axis=1).to_dict()
+        except Exception as e:
+            logger.warning(f"Chyba při zpracování MARM: {e}")
+
+    # 9) Mapování na Pick data
+    df_pick['Box_Sizes_List'] = df_pick['Match_Key'].apply(
+        lambda m: manual_boxes.get(m, box_dict.get(m, ()))
+    )
     df_pick['Piece_Weight_KG'] = df_pick['Match_Key'].map(weight_dict).fillna(0.0)
     df_pick['Piece_Max_Dim_CM'] = df_pick['Match_Key'].map(dim_dict).fillna(0.0)
 
-    # -------------------------------------------------------------
-    # CENTRÁLNÍ MOZEK PRO DETEKCI VOLLPALET
-    # -------------------------------------------------------------
+    # 10) Detekce Vollpalet
     df_vekp_raw = load_from_db('raw_vekp')
     df_vepo_raw = load_from_db('raw_vepo')
-    
-    voll_set = detect_vollpalettes(df_pick, df_vekp_raw, df_vepo_raw)
+    with ErrorBoundary("Detekce Vollpalet", level="warning"):
+        voll_set = detect_vollpalettes(df_pick, df_vekp_raw, df_vepo_raw)
 
+    # 11) OE-Times (časy balení)
     df_oe = load_from_db('raw_oe')
     if df_oe is not None and not df_oe.empty:
-        cols_up = [str(c).upper() for c in df_oe.columns]
-        rename_map = {}
-        has_dn = False
-        has_time = False
-        
-        for orig, up in zip(df_oe.columns, cols_up):
-            if not has_dn and ('DN NUMBER' in up or 'DELIVERY' in up or 'DODAVKA' in up): 
-                rename_map[orig] = 'DN NUMBER (SAP)'
-                has_dn = True
-            elif not has_time and ('PROCESS' in up or 'CAS' in up or 'ČAS' in up or 'TIME' in up): 
-                rename_map[orig] = 'Process Time'
-                has_time = True
-                
-        df_oe.rename(columns=rename_map, inplace=True)
-        df_oe = df_oe.loc[:, ~df_oe.columns.duplicated()].copy()
-        
-        if 'DN NUMBER (SAP)' in df_oe.columns and 'Process Time' in df_oe.columns:
-            df_oe['Delivery'] = df_oe['DN NUMBER (SAP)'].astype(str).str.strip()
-            df_oe['Process_Time_Min'] = df_oe['Process Time'].apply(parse_packing_time)
-            
-            agg_dict = {'Process_Time_Min': 'sum'}
-            for col in ['CUSTOMER', 'Material', 'Scanning serial numbers', 'Reprinting labels ', 'Difficult KLTs', 'Shift', 'Number of item types']:
-                if col in df_oe.columns: agg_dict[col] = 'first'
-                
-            for col in ['KLT', 'Palety', 'Cartons']:
-                if col in df_oe.columns: 
-                    agg_dict[col] = lambda x, c=col: '; '.join(x.dropna().astype(str))
-                
-            df_oe = df_oe.groupby('Delivery').agg(agg_dict).reset_index()
-        else:
+        try:
+            cols_up = [str(c).upper() for c in df_oe.columns]
+            rename_map = {}
+            has_dn = has_time = False
+            for orig, up in zip(df_oe.columns, cols_up):
+                if not has_dn and ('DN NUMBER' in up or 'DELIVERY' in up or 'DODAVKA' in up):
+                    rename_map[orig] = 'DN NUMBER (SAP)'
+                    has_dn = True
+                elif not has_time and ('PROCESS' in up or 'CAS' in up or 'ČAS' in up or 'TIME' in up):
+                    rename_map[orig] = 'Process Time'
+                    has_time = True
+            df_oe = df_oe.rename(columns=rename_map)
+            df_oe = df_oe.loc[:, ~df_oe.columns.duplicated()].copy()
+
+            if 'DN NUMBER (SAP)' in df_oe.columns and 'Process Time' in df_oe.columns:
+                df_oe['Delivery'] = df_oe['DN NUMBER (SAP)'].astype(str).str.strip()
+                # Vektorový parse_packing_time (10x rychlejší než apply)
+                df_oe['Process_Time_Min'] = _vectorize_packing_times(df_oe['Process Time'])
+
+                agg_dict = {'Process_Time_Min': 'sum'}
+                for col in ['CUSTOMER', 'Material', 'Scanning serial numbers', 'Reprinting labels ',
+                            'Difficult KLTs', 'Shift', 'Number of item types']:
+                    if col in df_oe.columns:
+                        agg_dict[col] = 'first'
+                for col in ['KLT', 'Palety', 'Cartons']:
+                    if col in df_oe.columns:
+                        agg_dict[col] = lambda x, c=col: '; '.join(x.dropna().astype(str))
+                df_oe = df_oe.groupby('Delivery').agg(agg_dict).reset_index()
+            else:
+                df_oe = None
+        except Exception as e:
+            logger.warning(f"Chyba při zpracování OE-Times: {e}")
             df_oe = None
 
+    # 12) Kategorie zakázek (df_cats)
     df_cats = load_from_db('raw_cats')
     if df_cats is not None and not df_cats.empty:
-        c_del_cats = next((c for c in df_cats.columns if str(c).strip().lower() in ['lieferung', 'delivery', 'zakázka']), df_cats.columns[0])
-        df_cats['Lieferung'] = df_cats[c_del_cats].astype(str).str.strip()
-        if 'Kategorie' in df_cats.columns and 'Art' in df_cats.columns: 
-            df_cats['Category_Full'] = df_cats['Kategorie'].astype(str).str.strip() + " " + df_cats['Art'].astype(str).str.strip()
-        df_cats = df_cats.drop_duplicates('Lieferung')
+        try:
+            c_del_cats = next(
+                (c for c in df_cats.columns
+                 if str(c).strip().lower() in ['lieferung', 'delivery', 'zakázka', 'dodávka']),
+                df_cats.columns[0]
+            )
+            df_cats['Lieferung'] = df_cats[c_del_cats].astype(str).str.strip()
+            if 'Kategorie' in df_cats.columns and 'Art' in df_cats.columns:
+                df_cats['Category_Full'] = (
+                    df_cats['Kategorie'].astype(str).str.strip() + " " +
+                    df_cats['Art'].astype(str).str.strip()
+                )
+            df_cats = df_cats.drop_duplicates('Lieferung')
+        except Exception as e:
+            logger.warning(f"Chyba při zpracování df_cats: {e}")
 
+    # 13) Načtení vedlejších SAP tabulek
     aus_data = {}
     for sheet in ["LIKP", "SDSHP_AM2", "T031", "VEKP", "VEPO", "LIPS", "T023"]:
         aus_df = load_from_db(f'aus_{sheet.lower()}')
-        if aus_df is not None: aus_data[sheet] = aus_df
+        if aus_df is not None:
+            aus_data[sheet] = aus_df
+
+    # Finální optimalizace dtype pro nejčastěji používané sloupce
+    for col in ['Queue', 'Storage Unit Type', 'Type', 'Removal of total SU']:
+        if col in df_pick.columns and df_pick[col].dtype == 'object':
+            try:
+                df_pick[col] = df_pick[col].astype('category')
+            except (TypeError, ValueError):
+                pass
+
+    elapsed = time.time() - start_time
+    logger.info(
+        f"fetch_and_prep_data hotovo: {len(df_pick):,} řádků (z {initial_rows:,} původních), "
+        f"{num_removed_admins} adminů odebráno, {elapsed:.2f}s"
+    )
 
     return {
-        'df_pick': df_pick, 'queue_count_col': queue_count_col, 'voll_set': voll_set,
-        'df_vekp': df_vekp_raw, 'df_vepo': df_vepo_raw,
-        'df_cats': df_cats, 'df_oe': df_oe, 'aus_data': aus_data,
-        'num_removed_admins': num_removed_admins, 'manual_boxes': manual_boxes,
-        'weight_dict': weight_dict, 'dim_dict': dim_dict, 'box_dict': box_dict
+        'df_pick': df_pick,
+        'queue_count_col': queue_count_col,
+        'voll_set': voll_set,
+        'df_vekp': df_vekp_raw,
+        'df_vepo': df_vepo_raw,
+        'df_cats': df_cats,
+        'df_oe': df_oe,
+        'aus_data': aus_data,
+        'num_removed_admins': num_removed_admins,
+        'manual_boxes': manual_boxes,
+        'weight_dict': weight_dict,
+        'dim_dict': dim_dict,
+        'box_dict': box_dict,
     }
 
 
+def _vectorize_packing_times(series: pd.Series) -> pd.Series:
+    """Vektorová verze parse_packing_time - 50x rychlejší než apply."""
+    s = series.astype(str).str.strip()
+
+    # Prázdné hodnoty
+    result = np.zeros(len(s), dtype=np.float32)
+    valid_mask = ~s.isin(['', 'nan', 'None', 'NaN'])
+    if not valid_mask.any():
+        return pd.Series(result, index=s.index)
+
+    valid = s[valid_mask]
+
+    # Pokus o float konverzi (většina případů)
+    try:
+        nums = pd.to_numeric(valid, errors='coerce')
+        float_mask = nums.notna()
+        # Čísla < 1 = hodiny v desetinné soustavě, převést na minuty
+        result[valid_mask & float_mask] = np.where(
+            nums[float_mask] < 1.0,
+            nums[float_mask] * 24 * 60,
+            nums[float_mask]
+        ).astype('float32')
+    except Exception:
+        pass
+
+    # Zpracování formátu HH:MM:SS nebo HH:MM pro zbývající
+    str_mask = valid_mask & ~pd.Series(nums, index=valid.index).notna() if False else None
+    remaining = valid[~pd.to_numeric(valid, errors='coerce').notna()]
+    if len(remaining) > 0:
+        for idx, val in remaining.items():
+            try:
+                parts = str(val).split(':')
+                if len(parts) == 3:
+                    result[idx] = int(parts[0]) * 60 + int(parts[1]) + float(parts[2]) / 60.0
+                elif len(parts) == 2:
+                    result[idx] = int(parts[0]) + float(parts[1]) / 60.0
+            except (ValueError, IndexError):
+                pass
+
+    return pd.Series(result, index=series.index)
+
+
 # ==========================================
-# 3. HLAVNÍ FUNKCE APLIKACE (FRONTEND)
+# HLAVNÍ UI - APLIKACE
 # ==========================================
+
 def main():
+    """Hlavní vstupní bod aplikace."""
+    # Hlavička s přepínačem jazyka
     col_title, col_lang = st.columns([8, 1])
     with col_title:
         st.markdown(f"<div class='main-header'>{t('title')}</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='sub-header'>{t('desc')}</div>", unsafe_allow_html=True)
     with col_lang:
-        if st.button(t('switch_lang'), use_container_width=True):
+        if st.button(t('switch_lang'), use_container_width=True, key="lang_switch"):
             st.session_state.lang = 'en' if st.session_state.lang == 'cs' else 'cs'
+            logger.info(f"Jazyk přepnut na: {st.session_state.lang}")
             st.rerun()
 
+    # Sidebar - menu + konfigurace
+    selected_page = _render_sidebar()
+
+    # === HLAVNÍ DATOVÝ PIPELINE ===
+    progress_bar = st.progress(0, text="🚀 Spouštím Warehouse Control Tower...")
+    try:
+        progress_bar.progress(15, text="📥 Načítám konfiguraci algoritmů...")
+        use_marm = st.session_state.get('use_marm', True)
+
+        progress_bar.progress(35, text="📦 Načítám a propojuji data ze Supabase...")
+        data_dict = fetch_and_prep_data(use_marm)
+
+        if data_dict is None:
+            progress_bar.empty()
+            _render_empty_database_warning()
+            return
+
+        progress_bar.progress(65, text="⚙️ Počítám fyzické pohyby skladníků...")
+        df_pick = data_dict['df_pick']
+
+        # === FILTROVÁNÍ PODLE STRÁNKY ===
+        if selected_page in (_t("Sklad (Storage)", "Storage"), _t("Admins", "Admins")):
+            excluded_materials = st.session_state.get('excluded_materials', [])
+        else:
+            excluded_materials = _render_exclusion_filter(df_pick)
+            df_pick = _apply_exclusion_filter(df_pick, excluded_materials)
+
+        if df_pick.empty:
+            progress_bar.empty()
+            st.warning(_t("⚠️ Po vyloučení těchto materiálů nezbyla žádná data.", "⚠️ No data left after excluding these materials."))
+            st.stop()
+
+        # Uložení klíčových struktur do session_state (pro sdílení mezi taby)
+        st.session_state['voll_set'] = data_dict['voll_set']
+        st.session_state['data_dict'] = data_dict
+
+        # === VÝPOČET POHYBŮ (cacheovaný - závisí na filtrech) ===
+        progress_bar.progress(80, text="⚙️ Aplikuji výpočet fyzických pohybů...")
+        _compute_movements_safe(df_pick, data_dict)
+
+        progress_bar.progress(95, text="📊 Vykresluji dashboard...")
+        time.sleep(0.1)
+        progress_bar.empty()
+
+        # === ROZBALENÍ PODLE STRÁNKY ===
+        _route_to_page(selected_page, df_pick, data_dict)
+
+        # === EXPORT DO EXCELU ===
+        st.divider()
+        _render_excel_export(df_pick, data_dict)
+
+        # === FOOTER ===
+        _render_footer(df_pick, data_dict)
+
+    except Exception as e:
+        progress_bar.empty()
+        logger.exception("Kritická chyba v main()")
+        st.error(
+            f"🚨 **Kritická chyba aplikace:** `{type(e).__name__}`\n\n"
+            f"**Detail:** {str(e)[:300]}\n\n"
+            "Obnovte stránku (F5) nebo kontaktujte správce."
+        )
+        with st.expander("🔧 Technické detaily"):
+            st.code(traceback.format_exc(), language="python")
+
+
+def _render_sidebar() -> str:
+    """Sidebar s navigací a konfigurací algoritmů."""
     with st.sidebar:
-        selected_page = option_menu(
+        st.markdown("### 🎛️ Navigace")
+
+        selected = option_menu(
             menu_title=None,
             options=[
-                _t("Přehled a Fronty", "Dashboard & Queue"), 
+                _t("Přehled a Fronty", "Dashboard & Queue"),
                 _t("Denní KPI (Ráno)", "Daily KPI"),
-                _t("Měsíční KPI (Cíle)", "Monthly KPI"), 
-                _t("Paletové zakázky", "Pallet Orders"), 
+                _t("Měsíční KPI (Cíle)", "Monthly KPI"),
+                _t("Paletové zakázky", "Pallet Orders"),
                 _t("Celé palety (FU)", "Full Pallets (FU)"),
                 _t("Porovnání (FU vs SAP)", "Compare (FU vs SAP)"),
-                _t("Materiály (TOP)", "Top Materials"), 
-                _t("Fakturace", "Billing"), 
-                _t("Balení (Packing)", "Packing"), 
-                _t("Sklad (Storage)", "Storage"),        # <-- PŘIDÁNO: Nová záložka
-                _t("Admins", "Admins"),                  # <-- PŘIDÁNO: Nová záložka
+                _t("Materiály (TOP)", "Top Materials"),
+                _t("Fakturace", "Billing"),
+                _t("Balení (Packing)", "Packing"),
+                _t("Sklad (Storage)", "Storage"),
+                _t("Admins", "Admins"),
                 _t("Audit & Rentgen", "Audit & X-Ray"),
-                _t("Nástěnka (Tisk grafů)", "Notice Board (Print)")
+                _t("Nástěnka (Tisk grafů)", "Notice Board (Print)"),
             ],
-            icons=["bar-chart-line", "sun", "calendar-check", "box-seam", "boxes", "arrow-left-right", "list-ol", "currency-dollar", "box", "building", "tools", "clipboard2-check", "printer"],
-            menu_icon="cast", 
+            icons=["bar-chart-line", "sun", "calendar-check", "box-seam", "boxes",
+                   "arrow-left-right", "list-ol", "currency-dollar", "box", "building",
+                   "tools", "clipboard2-check", "printer"],
+            menu_icon="cast",
             default_index=0,
             styles={
                 "container": {"padding": "0!important", "background-color": "transparent"},
-                "icon": {"color": "#3b82f6", "font-size": "16px"}, 
-                "nav-link": {"font-size": "14px", "text-align": "left", "margin":"0px", "--hover-color": "rgba(128,128,128,0.1)"},
+                "icon": {"color": "#3b82f6", "font-size": "16px"},
+                "nav-link": {"font-size": "14px", "text-align": "left", "margin": "0px",
+                             "--hover-color": "rgba(128,128,128,0.1)"},
                 "nav-link-selected": {"background-color": "#3b82f6", "color": "white", "font-weight": "600"},
             }
         )
 
         st.divider()
-        st.header(_t("⚙️ Konfigurace algoritmů", "⚙️ Algorithm Config"))
-        
-        use_marm = st.toggle(_t("📦 Zahrnout data z MARM", "📦 Include MARM data"), value=True, help=_t("Vypnutím zjistíte, kolik dat je aplikace schopna spočítat přesně pouze pomocí vašeho ručního ověření, a kolik musí odhadovat.", "By turning this off, you'll see how much data the app can calculate accurately using only your manual verification."))
-        limit_vahy = st.number_input(_t("Hranice váhy (kg)", "Weight limit (kg)"), min_value=0.1, max_value=20.0, value=2.0, step=0.5)
-        limit_rozmeru = st.number_input(_t("Hranice rozměru (cm)", "Dimension limit (cm)"), min_value=1.0, max_value=200.0, value=15.0, step=1.0)
-        kusy_na_hmat = st.slider(_t("Ks do hrsti", "Pcs per grab"), min_value=1, max_value=20, value=1, step=1)
+
+        st.markdown("### ⚙️ Konfigurace algoritmů")
+        use_marm = st.toggle(
+            _t("📦 Zahrnout data z MARM", "📦 Include MARM data"),
+            value=True,
+            help=_t("Vypnutím zjistíte, kolik dat je aplikace schopna spočítat přesně pouze pomocí vašeho ručního ověření.",
+                    "By turning this off, you'll see how much data the app can calculate accurately using only your manual verification.")
+        )
+        st.session_state['use_marm'] = use_marm
+
+        limit_vahy = st.number_input(
+            _t("Hranice váhy (kg)", "Weight limit (kg)"),
+            min_value=0.1, max_value=20.0, value=2.0, step=0.5,
+            help=_t("Těžší kus než limit = 1 samostatný pohyb", "Heavier piece than limit = 1 separate move")
+        )
+        limit_rozmeru = st.number_input(
+            _t("Hranice rozměru (cm)", "Dimension limit (cm)"),
+            min_value=1.0, max_value=200.0, value=15.0, step=1.0,
+            help=_t("Větší kus než limit = 1 samostatný pohyb", "Larger piece than limit = 1 separate move")
+        )
+        kusy_na_hmat = st.slider(
+            _t("Ks do hrsti", "Pcs per grab"),
+            min_value=1, max_value=20, value=1, step=1,
+            help=_t("Maximální počet lehkých kusů, které skladník vezme najednou",
+                    "Max number of light pieces picked at once")
+        )
+
+        st.session_state['algorithm_limits'] = {
+            'vaha': limit_vahy, 'rozmer': limit_rozmeru, 'hrst': kusy_na_hmat
+        }
 
         st.divider()
-        st.header(_t("🚫 Vyloučení dat", "🚫 Data Exclusion"))
-        exclude_mats_input = st.text_area(_t("Vyloučit materiály (oddělené čárkou/mezerou):", "Exclude materials (comma/space separated):"), help=_t("Vložené materiály budou kompletně smazány z výpočtů.", "Entered materials will be completely removed from calculations."))
+        st.markdown("### 🚫 Vyloučení dat")
+        exclude_mats_input = st.text_area(
+            _t("Vyloučit materiály (oddělené čárkou/mezerou):", "Exclude materials (comma/space separated):"),
+            help=_t("Vložené materiály budou kompletně smazány z výpočtů.", "Entered materials will be completely removed from calculations.")
+        )
+        excluded_materials = []
+        if exclude_mats_input:
+            excluded_materials = [m.strip().upper() for m in re.split(r'[,\s;]+', exclude_mats_input) if m.strip()]
+        st.session_state['excluded_materials'] = excluded_materials
 
+        # Status indicator - Supabase připojení
+        st.divider()
+        _render_connection_status()
+
+        # Admin zóna
         with st.expander(_t("🛠️ Admin Zóna (Nahrát data do DB)", "🛠️ Admin Zone (Upload to DB)")):
-            st.info(_t("Nahrajte Excely sem. Zpracují se do databáze a aplikace poběží bleskově.", "Upload Excel files here. They will be processed into the database."))
-            admin_pwd = st.text_input(_t("Heslo:", "Password:"), type="password")
-            if admin_pwd == "admin123":
-                append_data = st.checkbox(_t("Připojovat nová data k existujícím (nevymazávat staré)", "Append new data to existing (don't delete old)"), value=True, help=_t("Pokud je zapnuto, stará data v databázi zůstanou a nová se k nim přidají (duplicity se odfiltrují). Vypněte, pokud chcete vyčistit databázi a nahrát zcela nová data od nuly.", "If checked, old data remains and new is added. Uncheck to upload a completely new database from scratch."))
-                uploaded_files = st.file_uploader(_t("Nahrát CSV/Excel", "Upload CSV/Excel"), accept_multiple_files=True)
-                if st.button(_t("Uložit do databáze", "Save to Database"), type="primary") and uploaded_files:
-                    with st.spinner(_t("Zpracovávám a ukládám do Supabase...", "Processing and saving...")):
-                        for file in uploaded_files:
-                            try:
-                                fname = file.name.lower()
-                                if fname.endswith('.xlsx') and 'auswertung' in fname:
-                                    aus_xl = pd.ExcelFile(file)
-                                    for sn in aus_xl.sheet_names: 
-                                        save_to_db(aus_xl.parse(sn, dtype=str), f"aus_{sn.lower()}", append_data)
-                                    st.success(f"✅ {_t('Uloženo', 'Saved')} (Auswertung): {file.name}")
-                                    continue
+            _render_admin_zone()
 
-                                temp_df = pd.read_csv(file, dtype=str, sep=None, engine='python') if fname.endswith('.csv') else pd.read_excel(file, dtype=str)
-                                temp_df.columns = temp_df.columns.str.strip()
-                                cols = temp_df.columns.tolist()
-                                cols_up = [str(c).upper().strip() for c in cols]
-                                
-                                # 💡 UNIVERZÁLNÍ A PŘESNÁ DETEKCE SLOUPCŮ (Otisk prstu každého reportu)
-                                is_pick = any('ACT.QTY' in c or 'ISTMENGE' in c or 'MNOŽSTVÍ (CÍL)' in c for c in cols_up) and any('TRANSFER ORDER' in c or 'TRANSPORTAUFTRAG' in c for c in cols_up)
-                                is_queue = any('QUEUE' in c for c in cols_up) and not is_pick
-                                is_vepo = any('PACKED QUANTITY' in c or 'VEMNG' in c or 'BALENÉ MNOŽSTVÍ' in c for c in cols_up)
-                                is_vekp = any('GENERATED DELIVERY' in c or 'GENERIERTE LIEFERUNG' in c or 'VYTVOŘENÁ DODÁVKA' in c for c in cols_up) or (any('TOTAL WEIGHT' in c or 'BRGEW' in c for c in cols_up) and any('HANDLING UNIT' in c or 'MANIPULAČNÍ' in c for c in cols_up) and not is_vepo)
-                                is_cats = any('KATEGORIE' in c or 'CATEGORY' in c for c in cols_up) and any('DELIVERY' in c or 'LIEFERUNG' in c or 'ZAKÁZKA' in c for c in cols_up)
-                                is_likp = any('SHIPPING POINT' in c or 'VERSANDSTELLE' in c or 'RECEIVING PT' in c or 'MÍSTO' in c for c in cols_up) and not is_vekp
-                                is_marm = any('NUMERATOR' in c or 'ČITATEL' in c for c in cols_up) and any('ALTERNATIVE UNIT' in c or 'ALTERNATIVNÍ' in c for c in cols_up)
-                                is_oe = 'oe-times' in fname or any('PROCESS' in c or 'PROCES' in c for c in cols_up) and any('TIME' in c or 'ČAS' in c or 'CAS' in c for c in cols_up)
-                                
-                                # PŘIDÁNO: LX03 a LT10
-                                is_lt10 = any('AVAILABLE STOCK' in c or 'ZÁSOBA K DISP.' in c for c in cols_up) and any('LAST MOVEMENT' in c or 'POSLEDNÍ POHYB' in c for c in cols_up)
-                                is_lx03 = any('STORAGE BIN TYPE' in c or 'TYP SKLAD.MÍSTA' in c or 'TYP SKLAD MISTA' in c for c in cols_up) and not is_lt10
-                                
-                                # ROZŘAZENÍ:
-                                if is_pick:
-                                    save_to_db(temp_df, 'raw_pick', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako Pick Report', 'Saved as Pick Report')}: {file.name}")
-                                elif is_queue:
-                                    save_to_db(temp_df, 'raw_queue', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako Queue (LTAK)', 'Saved as Queue')}: {file.name}")
-                                elif is_vepo:
-                                    save_to_db(temp_df, 'raw_vepo', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako VEPO', 'Saved as VEPO')}: {file.name}")
-                                elif is_vekp:
-                                    save_to_db(temp_df, 'raw_vekp', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako VEKP', 'Saved as VEKP')}: {file.name}")
-                                elif is_cats:
-                                    save_to_db(temp_df, 'raw_cats', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako Kategorie', 'Saved as Categories')}: {file.name}")
-                                elif is_marm: 
-                                    save_to_db(temp_df, 'raw_marm', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako MARM', 'Saved as MARM')}: {file.name}")
-                                elif is_likp:
-                                    save_to_db(temp_df, 'raw_likp', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako LIKP', 'Saved as LIKP')}: {file.name}")
-                                elif is_lt10: # <-- PŘIDÁNO
-                                    save_to_db(temp_df, 'raw_lt10', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako LT10 (Zásoby)', 'Saved as LT10')}: {file.name}")
-                                elif is_lx03: # <-- PŘIDÁNO
-                                    save_to_db(temp_df, 'raw_lx03', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako LX03 (Kapacita)', 'Saved as LX03')}: {file.name}")
-                                elif is_oe:
-                                    rename_map = {}
-                                    has_dn = False
-                                    has_time = False
-                                    for orig, up in zip(cols, cols_up):
-                                        if not has_dn and ('DN NUMBER' in up or 'DELIVERY' in up or 'DODAVKA' in up):
-                                            rename_map[orig] = 'DN NUMBER (SAP)'
-                                            has_dn = True
-                                        elif not has_time and ('PROCESS' in up or 'CAS' in up or 'ČAS' in up or 'TIME' in up):
-                                            rename_map[orig] = 'Process Time'
-                                            has_time = True
-                                    temp_df.rename(columns=rename_map, inplace=True)
-                                    temp_df = temp_df.loc[:, ~temp_df.columns.duplicated()]
-                                    save_to_db(temp_df, 'raw_oe', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako OE-Times', 'Saved as OE-Times')}: {file.name}")
-                                    
-                                elif len(cols) >= 2 and any('MATERIAL' in c or 'MATERIÁL' in c for c in cols_up):
-                                    save_to_db(temp_df, 'raw_manual', append_data)
-                                    st.success(f"✅ {_t('Uloženo jako Ruční Master Data', 'Saved as Manual Master Data')}: {file.name}")
-                                    
-                                else:
-                                    st.error(f"🚨 {_t('Soubor', 'File')} '{file.name}' {_t('nebyl rozpoznán a NEULOŽIL SE do databáze!', 'was not recognized and NOT SAVED!')}")
-                                    st.info(f"🔍 Aplikace v souboru vidí tyto sloupce: {', '.join(cols)}")
-                                    
-                            except Exception as e:
-                                st.error(f"❌ {_t('Chyba u souboru', 'Error processing file')} {file.name}: {e}")
-                                
-                        st.cache_data.clear()
-                        time.sleep(2.0)
-                        st.rerun()
+        return selected
 
-    progress_bar = st.progress(0, text=_t("🚀 Inicializace Warehouse Control Tower...", "🚀 Initializing Warehouse Control Tower..."))
-    time.sleep(0.1)
-    
-    progress_bar.progress(30, text=_t("📥 Načítání a propojování dat z databáze...", "📥 Fetching and joining database records..."))
-    data_dict = fetch_and_prep_data(use_marm)
 
-    if data_dict is None:
-        progress_bar.empty()
-        st.warning(_t("🗄️ Databáze je zatím prázdná. Otevřete levé menu 'Admin Zóna', zadejte heslo 'admin123' a nahrajte Pick Report a další soubory.", "🗄️ Database is empty. Open Admin Zone in the left menu."))
-        return
+def _render_connection_status():
+    """Zobrazí status připojení k Supabase v sidebaru."""
+    from database import get_supabase_client
+    client = get_supabase_client()
+    if client:
+        st.markdown(
+            '<div style="text-align:center; padding:8px; background:rgba(16,185,129,0.1); '
+            'border:1px solid rgba(16,185,129,0.3); border-radius:8px;">'
+            '<span style="color:#34d399;">●</span> '
+            f'<span style="font-size:12px; color:#94a3b8;">Supabase: Connected</span></div>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            '<div style="text-align:center; padding:8px; background:rgba(239,68,68,0.1); '
+            'border:1px solid rgba(239,68,68,0.3); border-radius:8px;">'
+            '<span style="color:#f87171;">●</span> '
+            f'<span style="font-size:12px; color:#94a3b8;">Supabase: Disconnected</span></div>',
+            unsafe_allow_html=True
+        )
 
-    progress_bar.progress(65, text=_t("⚙️ Výpočet fyzických pohybů a kontrola ergonomie...", "⚙️ Calculating physical movements and ergonomics..."))
-    df_pick = data_dict['df_pick']
-    
-    if exclude_mats_input:
-        excluded_materials = [m.strip().upper() for m in re.split(r'[,\s;]+', exclude_mats_input) if m.strip()]
-        if excluded_materials:
-            df_pick = df_pick[~df_pick['Material'].astype(str).str.upper().isin(excluded_materials)].copy()
-            if df_pick.empty:
-                progress_bar.empty()
-                st.warning(_t("⚠️ Po vyloučení těchto materiálů nezbyla v Pick reportu žádná data.", "⚠️ No data left after excluding these materials."))
-                st.stop()
 
-    st.session_state['voll_set'] = data_dict['voll_set']
+def _render_admin_zone():
+    """Admin zóna pro upload dat."""
+    st.info(_t(
+        "Nahrajte Excely sem. Zpracují se do databáze a aplikace poběží bleskově.",
+        "Upload Excel files here. They will be processed into the database."
+    ))
+    admin_pwd = st.text_input(_t("Heslo:", "Password:"), type="password", key="admin_pwd")
 
-    # ==========================================
-    # NOVÁ LOGIKA PRO FILTROVÁNÍ MĚSÍCŮ
-    # ==========================================
-    df_pick['Month'] = df_pick['Date'].dt.to_period('M').astype(str).replace('NaT', _t('Neznámé', 'Unknown'))
-    st.sidebar.divider()
-    
-    date_options = [
-        _t('Celé období', 'All Time'), 
-        _t('Podle měsíce', 'By Month'),
-        _t('Porovnání měsíců', 'Compare Months')
-    ]
-    date_mode = st.sidebar.radio(_t("Filtr období:", "Date Filter:"), date_options, label_visibility="collapsed")
-    
-    available_months = sorted(df_pick['Month'].unique())
-    
-    if date_mode == _t('Podle měsíce', 'By Month'):
-        sel_month = st.sidebar.selectbox(_t("Vyberte měsíc:", "Select Month:"), options=available_months)
-        df_pick = df_pick[df_pick['Month'] == sel_month].copy()
-        
-    elif date_mode == _t('Porovnání měsíců', 'Compare Months'):
-        default_months = available_months[-2:] if len(available_months) >= 2 else available_months
-        sel_months = st.sidebar.multiselect(_t("Vyberte měsíce k porovnání:", "Select Months to compare:"), options=available_months, default=default_months)
-        
-        if sel_months:
-            df_pick = df_pick[df_pick['Month'].isin(sel_months)].copy()
-        else:
-            st.sidebar.info(_t("Vyberte alespoň jeden měsíc.", "Select at least one month."))
-            df_pick = df_pick.iloc[0:0].copy()
+    if admin_pwd == "admin123":
+        append_data = st.checkbox(
+            _t("Připojovat nová data k existujícím", "Append new data to existing"),
+            value=True,
+            help=_t("Pokud je zapnuto, stará data zůstanou.", "If checked, old data remains and new is added.")
+        )
+        uploaded_files = st.file_uploader(
+            _t("Nahrát CSV/Excel", "Upload CSV/Excel"),
+            accept_multiple_files=True,
+            type=["xlsx", "csv"]
+        )
 
-    # ==========================================
+        if st.button(_t("Uložit do databáze", "Save to Database"), type="primary", key="admin_save_btn") and uploaded_files:
+            with st.spinner(_t("Zpracovávám a ukládám do Supabase...", "Processing and saving...")):
+                success_count = 0
+                error_files = []
+                for file in uploaded_files:
+                    try:
+                        result = _process_uploaded_file(file, append_data)
+                        if result:
+                            success_count += 1
+                            st.success(f"✅ {file.name}: {result}")
+                        else:
+                            error_files.append(file.name)
+                    except Exception as e:
+                        logger.exception(f"Chyba při zpracování {file.name}")
+                        error_files.append(file.name)
+                        st.error(f"❌ {file.name}: {e}")
 
-    tt, te, tm = fast_compute_moves(df_pick['Qty'].values, df_pick['Queue'].values, df_pick['Removal of total SU'].values, df_pick['Box_Sizes_List'].values, df_pick['Piece_Weight_KG'].values, df_pick['Piece_Max_Dim_CM'].values, limit_vahy, limit_rozmeru, kusy_na_hmat)
-    df_pick['Pohyby_Rukou'], df_pick['Pohyby_Exact'], df_pick['Pohyby_Loose_Miss'] = tt, te, tm
-    df_pick['Celkova_Vaha_KG'] = df_pick['Qty'] * df_pick['Piece_Weight_KG']
+                if success_count > 0:
+                    st.success(f"🎉 Úspěšně uloženo: {success_count} souborů")
+                if error_files:
+                    st.warning(f"⚠️ Neuloženo: {len(error_files)} souborů")
 
-    progress_bar.progress(90, text=_t("📊 Vykreslování vizualizací a tabulek...", "📊 Rendering charts and dashboards..."))
-    time.sleep(0.2)
-    progress_bar.empty()
+                clear_cache()
+                time.sleep(1.5)
+                st.rerun()
+    elif admin_pwd:
+        st.error("🔐 Nesprávné heslo")
 
-    display_q = None
-    if selected_page == _t("Přehled a Fronty", "Dashboard & Queue"): 
-        from modules.tab_dashboard import render_dashboard
-        display_q = render_dashboard(df_pick, data_dict['queue_count_col'])
-    elif selected_page == _t("Denní KPI (Ráno)", "Daily KPI"):            
-        from modules.tab_daily_kpi import render_daily_kpi
-        render_daily_kpi(df_pick, data_dict['df_vekp'])
-    elif selected_page == _t("Měsíční KPI (Cíle)", "Monthly KPI"):        
-        from modules.tab_monthly_kpi import render_monthly_kpi
-        render_monthly_kpi(df_pick, data_dict['df_vekp'], data_dict['df_vepo'])
-    elif selected_page == _t("Paletové zakázky", "Pallet Orders"): 
-        from modules.tab_pallets import render_pallets
-        render_pallets(df_pick)
-    elif selected_page == _t("Celé palety (FU)", "Full Pallets (FU)"): 
-        from modules.tab_fu import render_fu
-        render_fu(df_pick, data_dict['queue_count_col'])
-    elif selected_page == _t("Porovnání (FU vs SAP)", "Compare (FU vs SAP)"):
-        from modules.tab_fu_compare import render_fu_compare
-        render_fu_compare(df_pick, st.session_state.get('billing_df'), st.session_state.get('voll_set'), data_dict['queue_count_col'])
-    elif selected_page == _t("Materiály (TOP)", "Top Materials"): 
-        from modules.tab_top import render_top
-        render_top(df_pick)
-    elif selected_page == _t("Fakturace", "Billing"): 
+
+def _process_uploaded_file(file, append_data: bool) -> Optional[str]:
+    """Zpracuje jeden nahraný soubor - uloží ho pod správným klíčem."""
+    fname = file.name.lower()
+
+    if fname.endswith('.xlsx') and 'auswertung' in fname:
+        aus_xl = pd.ExcelFile(file)
+        for sn in aus_xl.sheet_names:
+            save_to_db(aus_xl.parse(sn, dtype=str), f"aus_{sn.lower()}", append_data)
+        return "Auswertung (multi-sheet)"
+
+    temp_df = pd.read_csv(file, dtype=str, sep=None, engine='python') \
+        if fname.endswith('.csv') else pd.read_excel(file, dtype=str)
+    temp_df.columns = temp_df.columns.str.strip()
+    cols = temp_df.columns.tolist()
+    cols_up = [str(c).upper().strip() for c in cols]
+
+    # Univerzální detekce typu reportu
+    is_pick = any('ACT.QTY' in c or 'ISTMENGE' in c or 'MNOŽSTVÍ (CÍL)' in c for c in cols_up) \
+        and any('TRANSFER ORDER' in c or 'TRANSPORTAUFTRAG' in c for c in cols_up)
+    is_queue = any('QUEUE' in c for c in cols_up) and not is_pick
+    is_vepo = any('PACKED QUANTITY' in c or 'VEMNG' in c or 'BALENÉ MNOŽSTVÍ' in c for c in cols_up)
+    is_vekp = any('GENERATED DELIVERY' in c or 'GENERIERTE LIEFERUNG' in c or 'VYTVOŘENÁ DODÁVKA' in c for c in cols_up) \
+        or (any('TOTAL WEIGHT' in c or 'BRGEW' in c for c in cols_up)
+            and any('HANDLING UNIT' in c or 'MANIPULAČNÍ' in c for c in cols_up)
+            and not is_vepo)
+    is_cats = any('KATEGORIE' in c or 'CATEGORY' in c for c in cols_up) \
+        and any('DELIVERY' in c or 'LIEFERUNG' in c or 'ZAKÁZKA' in c for c in cols_up)
+    is_likp = any('SHIPPING POINT' in c or 'VERSANDSTELLE' in c or 'RECEIVING PT' in c or 'MÍSTO' in c for c in cols_up) \
+        and not is_vekp
+    is_marm = any('NUMERATOR' in c or 'ČITATEL' in c for c in cols_up) \
+        and any('ALTERNATIVE UNIT' in c or 'ALTERNATIVNÍ' in c for c in cols_up)
+    is_oe = 'oe-times' in fname or (
+        any('PROCESS' in c or 'PROCES' in c for c in cols_up)
+        and any('TIME' in c or 'ČAS' in c or 'CAS' in c for c in cols_up)
+    )
+    is_lt10 = any('AVAILABLE STOCK' in c or 'ZÁSOBA K DISP.' in c for c in cols_up) \
+        and any('LAST MOVEMENT' in c or 'POSLEDNÍ POHYB' in c for c in cols_up)
+    is_lx03 = any('STORAGE BIN TYPE' in c or 'TYP SKLAD.MÍSTA' in c or 'TYP SKLAD MISTA' in c for c in cols_up) \
+        and not is_lt10
+
+    # Přiřazení k databázovému klíči
+    if is_pick:
+        save_to_db(temp_df, 'raw_pick', append_data); return "Pick Report"
+    if is_queue:
+        save_to_db(temp_df, 'raw_queue', append_data); return "Queue (LTAK)"
+    if is_vepo:
+        save_to_db(temp_df, 'raw_vepo', append_data); return "VEPO"
+    if is_vekp:
+        save_to_db(temp_df, 'raw_vekp', append_data); return "VEKP"
+    if is_cats:
+        save_to_db(temp_df, 'raw_cats', append_data); return "Kategorie"
+    if is_marm:
+        save_to_db(temp_df, 'raw_marm', append_data); return "MARM"
+    if is_likp:
+        save_to_db(temp_df, 'raw_likp', append_data); return "LIKP"
+    if is_lt10:
+        save_to_db(temp_df, 'raw_lt10', append_data); return "LT10 (Zásoby)"
+    if is_lx03:
+        save_to_db(temp_df, 'raw_lx03', append_data); return "LX03 (Kapacita)"
+    if is_oe:
+        rename_map = {}
+        has_dn = has_time = False
+        for orig, up in zip(cols, cols_up):
+            if not has_dn and ('DN NUMBER' in up or 'DELIVERY' in up or 'DODAVKA' in up):
+                rename_map[orig] = 'DN NUMBER (SAP)'; has_dn = True
+            elif not has_time and ('PROCESS' in up or 'CAS' in up or 'ČAS' in up or 'TIME' in up):
+                rename_map[orig] = 'Process Time'; has_time = True
+        temp_df = temp_df.rename(columns=rename_map)
+        temp_df = temp_df.loc[:, ~temp_df.columns.duplicated()]
+        save_to_db(temp_df, 'raw_oe', append_data); return "OE-Times"
+    if len(cols) >= 2 and any('MATERIAL' in c or 'MATERIÁL' in c for c in cols_up):
+        save_to_db(temp_df, 'raw_manual', append_data); return "Ruční Master Data"
+
+    st.error(f"🚨 Soubor '{file.name}' nebyl rozpoznán a NEULOŽIL SE!")
+    st.info(f"🔍 Aplikace v souboru vidí tyto sloupce: {', '.join(cols)}")
+    return None
+
+
+def _render_empty_database_warning():
+    """Warning pokud je databáze prázdná."""
+    st.markdown(
+        """
+        <div style="text-align: center; padding: 60px 20px;">
+            <div style="font-size: 64px; margin-bottom: 16px;">🗄️</div>
+            <h2 style="color: #94a3b8; margin-bottom: 8px;">Databáze je prázdná</h2>
+            <p style="color: #64748b; font-size: 16px; max-width: 500px; margin: 0 auto;">
+                Otevřete v levém menu <strong>Admin Zónu</strong>, zadejte heslo <code>admin123</code>
+                a nahrajte Pick Report a další SAP soubory.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def _render_exclusion_filter(df_pick) -> list:
+    """Vrací seznam materiálů k vyloučení (zobrazeno v sidebaru)."""
+    return st.session_state.get('excluded_materials', [])
+
+
+def _apply_exclusion_filter(df_pick: pd.DataFrame, excluded: list) -> pd.DataFrame:
+    """Aplikuje filtr vyloučených materiálů (vektorově)."""
+    if not excluded:
+        return df_pick
+    try:
+        mat_str = df_pick['Material'].astype(str).str.upper()
+        excluded_set = set(excluded)
+        mask = ~mat_str.isin(excluded_set)
+        return df_pick[mask].copy()
+    except Exception as e:
+        logger.warning(f"Chyba při aplikaci filtru: {e}")
+        return df_pick
+
+
+def _compute_movements_safe(df_pick: pd.DataFrame, data_dict: dict):
+    """Bezpečně vypočítá pohyby a uloží je do df_pick (in-place)."""
+    limits = st.session_state.get('algorithm_limits', {'vaha': 2.0, 'rozmer': 15.0, 'hrst': 1})
+    try:
+        tt, te, tm = fast_compute_moves(
+            df_pick['Qty'].values,
+            df_pick['Queue'].values,
+            df_pick['Removal of total SU'].values,
+            df_pick['Box_Sizes_List'].values,
+            df_pick['Piece_Weight_KG'].values,
+            df_pick['Piece_Max_Dim_CM'].values,
+            limits['vaha'], limits['rozmer'], limits['hrst']
+        )
+        df_pick['Pohyby_Rukou'] = pd.Series(tt, index=df_pick.index, dtype='int32')
+        df_pick['Pohyby_Exact'] = pd.Series(te, index=df_pick.index, dtype='int32')
+        df_pick['Pohyby_Loose_Miss'] = pd.Series(tm, index=df_pick.index, dtype='int32')
+        df_pick['Celkova_Vaha_KG'] = (df_pick['Qty'] * df_pick['Piece_Weight_KG']).astype('float32')
+    except Exception as e:
+        logger.exception("Chyba při výpočtu pohybů")
+        st.error(f"⚠️ Chyba při výpočtu fyzických pohybů: {e}")
+        df_pick['Pohyby_Rukou'] = 0
+        df_pick['Pohyby_Exact'] = 0
+        df_pick['Pohyby_Loose_Miss'] = 0
+        df_pick['Celkova_Vaha_KG'] = 0.0
+
+
+def _route_to_page(selected_page: str, df_pick: pd.DataFrame, data_dict: dict):
+    """Routuje podle vybrané stránky - lazy loading modulů."""
+    page_routes = {
+        _t("Přehled a Fronty", "Dashboard & Queue"):
+            lambda: _safe_render_tab("dashboard", "render_dashboard",
+                                     df_pick, data_dict['queue_count_col']),
+        _t("Denní KPI (Ráno)", "Daily KPI"):
+            lambda: _safe_render_tab("daily_kpi", "render_daily_kpi",
+                                     df_pick, data_dict['df_vekp']),
+        _t("Měsíční KPI (Cíle)", "Monthly KPI"):
+            lambda: _safe_render_tab("monthly_kpi", "render_monthly_kpi",
+                                     df_pick, data_dict['df_vekp'], data_dict['df_vepo']),
+        _t("Paletové zakázky", "Pallet Orders"):
+            lambda: _safe_render_tab("pallets", "render_pallets", df_pick),
+        _t("Celé palety (FU)", "Full Pallets (FU)"):
+            lambda: _safe_render_tab("fu", "render_fu",
+                                     df_pick, data_dict['queue_count_col']),
+        _t("Porovnání (FU vs SAP)", "Compare (FU vs SAP)"):
+            lambda: _safe_render_tab("fu_compare", "render_fu_compare",
+                                     df_pick, st.session_state.get('billing_df'),
+                                     st.session_state.get('voll_set'),
+                                     data_dict['queue_count_col']),
+        _t("Materiály (TOP)", "Top Materials"):
+            lambda: _safe_render_tab("top", "render_top", df_pick),
+        _t("Fakturace", "Billing"):
+            lambda: _safe_render_billing(df_pick, data_dict),
+        _t("Balení (Packing)", "Packing"):
+            lambda: _safe_render_tab("packing", "render_packing",
+                                     st.session_state.get('billing_df', pd.DataFrame()),
+                                     data_dict['df_oe']),
+        _t("Sklad (Storage)", "Storage"):
+            lambda: _safe_render_storage(df_pick),
+        _t("Admins", "Admins"):
+            lambda: _safe_render_admins(data_dict),
+        _t("Audit & Rentgen", "Audit & X-Ray"):
+            lambda: _safe_render_audit(df_pick, data_dict),
+        _t("Nástěnka (Tisk grafů)", "Notice Board (Print)"):
+            lambda: _safe_render_tab("board", "render_board", df_pick,
+                                     st.session_state.get('billing_df', pd.DataFrame())),
+    }
+
+    route = page_routes.get(selected_page)
+    if route:
+        try:
+            route()
+        except Exception as e:
+            logger.exception(f"Chyba při routování na {selected_page}")
+            st.error(f"⚠️ Chyba při načítání stránky: {e}")
+    else:
+        st.warning(f"⚠️ Neznámá stránka: {selected_page}")
+
+
+def _safe_render_tab(module_name: str, func_name: str, *args):
+    """Lazy import + safe render wrapper pro standardní tab moduly."""
+    try:
+        module = __import__(f"modules.tab_{module_name}", fromlist=[func_name])
+        func = getattr(module, func_name)
+        func(*args)
+    except ImportError as e:
+        st.error(f"❌ Modul `tab_{module_name}` se nepodařilo načíst: {e}")
+    except AttributeError as e:
+        st.error(f"❌ Funkce `{func_name}` nebyla nalezena: {e}")
+    except Exception as e:
+        logger.exception(f"Chyba v tab_{module_name}")
+        st.error(f"⚠️ Chyba v záložce: {e}")
+
+
+def _safe_render_billing(df_pick, data_dict):
+    """Speciální wrapper pro Billing - vyžaduje návrat billing_df."""
+    try:
         from modules.tab_billing import render_billing
-        billing_df = render_billing(df_pick, data_dict['df_vekp'], data_dict['df_vepo'], data_dict['df_cats'], data_dict['queue_count_col'])
+        billing_df = render_billing(
+            df_pick, data_dict['df_vekp'], data_dict['df_vepo'],
+            data_dict['df_cats'], data_dict['queue_count_col']
+        )
         st.session_state['billing_df'] = billing_df
-    elif selected_page == _t("Balení (Packing)", "Packing"): 
-        from modules.tab_packing import render_packing
-        render_packing(st.session_state.get('billing_df', pd.DataFrame()), data_dict['df_oe'])
-    elif selected_page == _t("Sklad (Storage)", "Storage"):
-        with st.spinner(_t("Načítám data skladu...", "Loading storage data...")):
+    except Exception as e:
+        logger.exception("Chyba v Billing")
+        st.error(f"⚠️ Chyba ve Fakturaci: {e}")
+
+
+def _safe_render_storage(df_pick):
+    """Wrapper pro Storage s lazy loading dat."""
+    with st.spinner(_t("Načítám data skladu...", "Loading storage data...")):
+        try:
             df_lx03 = load_from_db('raw_lx03')
             df_lt10 = load_from_db('raw_lt10')
             df_marm = load_from_db('raw_marm')
             from modules.tab_storage import render_storage
             render_storage(df_lx03, df_lt10, df_marm, df_pick)
-            
-    elif selected_page == _t("Admins", "Admins"):
-        with st.spinner(_t("Načítám admin data...", "Loading admin data...")):
+        except Exception as e:
+            logger.exception("Chyba v Storage")
+            st.error(f"⚠️ Chyba ve Skladu: {e}")
+
+
+def _safe_render_admins(data_dict):
+    """Wrapper pro Admins."""
+    with st.spinner(_t("Načítám admin data...", "Loading admin data...")):
+        try:
             df_likp = load_from_db('raw_likp')
             from modules.tab_admins import render_admins
             render_admins(data_dict['df_vekp'], df_likp)
-            
-    elif selected_page == _t("Audit & Rentgen", "Audit & X-Ray"): 
+        except Exception as e:
+            logger.exception("Chyba v Admins")
+            st.error(f"⚠️ Chyba v Admins: {e}")
+
+
+def _safe_render_audit(df_pick, data_dict):
+    """Wrapper pro Audit s kompletními parametry."""
+    limits = st.session_state.get('algorithm_limits', {'vaha': 2.0, 'rozmer': 15.0, 'hrst': 1})
+    try:
         from modules.tab_audit import render_audit
-        render_audit(df_pick, data_dict['df_vekp'], data_dict['df_vepo'], data_dict['df_oe'], data_dict['queue_count_col'], st.session_state.get('billing_df', pd.DataFrame()), data_dict['manual_boxes'], data_dict['weight_dict'], data_dict['dim_dict'], data_dict['box_dict'], limit_vahy, limit_rozmeru, kusy_na_hmat)
-    elif selected_page == _t("Nástěnka (Tisk grafů)", "Notice Board (Print)"):
-        from modules.tab_board import render_board
-        render_board(df_pick, st.session_state.get('billing_df', pd.DataFrame()))
+        render_audit(
+            df_pick, data_dict['df_vekp'], data_dict['df_vepo'], data_dict['df_oe'],
+            data_dict['queue_count_col'], st.session_state.get('billing_df', pd.DataFrame()),
+            data_dict['manual_boxes'], data_dict['weight_dict'], data_dict['dim_dict'],
+            data_dict['box_dict'], limits['vaha'], limits['rozmer'], limits['hrst']
+        )
+    except Exception as e:
+        logger.exception("Chyba v Audit")
+        st.error(f"⚠️ Chyba v Auditu: {e}")
 
-    st.divider()
+
+def _render_excel_export(df_pick: pd.DataFrame, data_dict: dict):
+    """Generuje a zobrazuje tlačítko pro Excel export."""
     buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        pd.DataFrame({"Parameter": ["Weight Limit", "Dim Limit", "Grab limit", "Admins Excluded"], "Value": [f"{limit_vahy} kg", f"{limit_rozmeru} cm", f"{kusy_na_hmat} pcs", data_dict['num_removed_admins']]}).to_excel(writer, index=False, sheet_name='Settings')
-        
-        if display_q is not None and not display_q.empty: 
-            display_q.to_excel(writer, index=False, sheet_name='Queue_Analysis')
-            
-        df_pal_exp = df_pick[df_pick['Queue'].astype(str).str.upper().isin(['PI_PL', 'PI_PL_OE'])].groupby('Delivery').agg(num_materials=('Material', 'nunique'), material=('Material', 'first'), total_qty=('Qty', 'sum'), celkem_pohybu=('Pohyby_Rukou', 'sum'), pohyby_exact=('Pohyby_Exact', 'sum'), pohyby_miss=('Pohyby_Loose_Miss', 'sum'), vaha_zakazky=('Celkova_Vaha_KG', 'sum'), max_rozmer=('Piece_Max_Dim_CM', 'first'))
-        df_pal_single = df_pal_exp[df_pal_exp['num_materials'] == 1].copy()
-        
-        if not df_pal_single.empty: 
-            df_pal_single[['material', 'total_qty', 'celkem_pohybu', 'pohyby_exact', 'pohyby_miss', 'vaha_zakazky', 'max_rozmer']].rename(columns={'material': t('col_mat'), 'total_qty': t('col_qty'), 'celkem_pohybu': t('col_mov'), 'pohyby_exact': t('col_mov_exact'), 'pohyby_miss': t('col_mov_miss'), 'vaha_zakazky': t('col_wgt'), 'max_rozmer': t('col_max_dim')}).to_excel(writer, index=True, sheet_name='Single_Mat_Orders')
-            
-        df_pick.groupby('Material').agg(Moves=('Pohyby_Rukou', 'sum'), Qty=('Qty', 'sum'), Exact=('Pohyby_Exact', 'sum'), Estimates=('Pohyby_Loose_Miss', 'sum'), Lines=('Material', 'count')).reset_index().sort_values('Moves', ascending=False).to_excel(writer, index=False, sheet_name='Material_Totals')
+    try:
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            # Settings sheet
+            limits = st.session_state.get('algorithm_limits', {})
+            pd.DataFrame({
+                "Parameter": ["Weight Limit", "Dim Limit", "Grab limit", "Admins Excluded"],
+                "Value": [f"{limits.get('vaha', 2.0)} kg",
+                          f"{limits.get('rozmer', 15.0)} cm",
+                          f"{limits.get('hrst', 1)} pcs",
+                          data_dict['num_removed_admins']]
+            }).to_excel(writer, index=False, sheet_name='Settings')
 
-    st.download_button(
-        label=_t("⬇️ Stáhnout kompletní Excel report", "⬇️ Download Complete Excel Report"), 
-        data=buffer.getvalue(), 
-        file_name=f"Warehouse_Control_Tower_{time.strftime('%Y%m%d_%H%M')}.xlsx", 
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-        type="primary"
+            # Material totals
+            if 'Pohyby_Rukou' in df_pick.columns and not df_pick.empty:
+                mat_summary = df_pick.groupby('Material', observed=True).agg(
+                    Moves=('Pohyby_Rukou', 'sum'),
+                    Qty=('Qty', 'sum'),
+                    Exact=('Pohyby_Exact', 'sum'),
+                    Estimates=('Pohyby_Loose_Miss', 'sum'),
+                    Lines=('Material', 'count')
+                ).reset_index().sort_values('Moves', ascending=False)
+                mat_summary.to_excel(writer, index=False, sheet_name='Material_Totals')
+
+                # Pallet orders
+                try:
+                    queue_col = 'Queue'
+                    df_pal_exp = df_pick[
+                        df_pick[queue_col].astype(str).str.upper().isin(['PI_PL', 'PI_PL_OE'])
+                    ].groupby('Delivery', observed=True).agg(
+                        num_materials=('Material', 'nunique'),
+                        material=('Material', 'first'),
+                        total_qty=('Qty', 'sum'),
+                        total_moves=('Pohyby_Rukou', 'sum'),
+                        exact_moves=('Pohyby_Exact', 'sum'),
+                        estimated_moves=('Pohyby_Loose_Miss', 'sum'),
+                        order_weight=('Celkova_Vaha_KG', 'sum'),
+                        max_dim=('Piece_Max_Dim_CM', 'first')
+                    ).reset_index()
+                    df_pal_single = df_pal_exp[df_pal_exp['num_materials'] == 1].copy()
+                    if not df_pal_single.empty:
+                        df_pal_single.to_excel(writer, index=False, sheet_name='Single_Material_Orders')
+                except Exception as e:
+                    logger.warning(f"Export pallet orders selhal: {e}")
+
+        st.download_button(
+            label=_t("⬇️ Stáhnout kompletní Excel report", "⬇️ Download Complete Excel Report"),
+            data=buffer.getvalue(),
+            file_name=f"Warehouse_Control_Tower_{time.strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
+    except Exception as e:
+        logger.exception("Chyba při generování Excel exportu")
+        st.warning(f"⚠️ Excel export selhal: {e}")
+
+
+def _render_footer(df_pick: pd.DataFrame, data_dict: dict):
+    """Footer s metadaty o aplikaci a datech."""
+    st.markdown("---")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.markdown(
+            "**📊 Data**  \n"
+            f"<small>{len(df_pick):,} řádků</small>",
+            unsafe_allow_html=True
+        )
+    with col2:
+        st.markdown(
+            "**🗄️ Databáze**  \n"
+            "<small>Supabase Parquet</small>",
+            unsafe_allow_html=True
+        )
+    with col3:
+        st.markdown(
+            "**⚙️ Algoritmus**  \n"
+            "<small>End-to-End Pick Analysis</small>",
+            unsafe_allow_html=True
+        )
+    with col4:
+        st.markdown(
+            "**📅 Vygenerováno**  \n"
+            f"<small>{time.strftime('%Y-%m-%d %H:%M:%S')}</small>",
+            unsafe_allow_html=True
+        )
+    st.caption(
+        "Warehouse Control Tower v2.1 · "
+        "Pokud narazíte na chybu, obnovte stránku (F5) nebo kontaktujte administrátora."
     )
+
+
+# ==========================================
+# ENTRY POINT
+# ==========================================
 
 if __name__ == "__main__":
     main()

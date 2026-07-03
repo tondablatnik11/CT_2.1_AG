@@ -6,13 +6,14 @@ import datetime
 import io
 from database import load_from_db
 from modules.utils import safe_hu
+from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
 
 try:
     fast_render = st.fragment
 except AttributeError:
     fast_render = lambda f: f
 
-@fast_render
+@safe_render(fallback_message="⚠️ Chyba při vykreslování Denního KPI")
 def render_daily_kpi(df_pick, raw_vekp):
     # Překladová funkce přímo pro tuto záložku
     def _t(cs, en): 

@@ -4,12 +4,14 @@ import numpy as np
 import io
 import re
 from modules.utils import t, get_match_key, safe_del, safe_hu
+from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
 
 try:
     fast_render = st.fragment
 except AttributeError:
     fast_render = lambda f: f
 
+@safe_render(fallback_message="⚠️ Chyba při vykreslování Auditu")
 def render_audit(df_pick, df_vekp, df_vepo, df_oe, queue_count_col, billing_df, manual_boxes=None, weight_dict=None, dim_dict=None, box_dict=None, limit_vahy=2.0, limit_rozmeru=15.0, kusy_na_hmat=1):
     if manual_boxes is None: manual_boxes = {}
     if weight_dict is None: weight_dict = {}
