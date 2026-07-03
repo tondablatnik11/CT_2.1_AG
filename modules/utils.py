@@ -55,16 +55,17 @@ CHART_YAXIS_DEFAULTS = dict(
 )
 
 
-def apply_chart_defaults(fig, **overrides):
+def apply_chart_defaults(**overrides):
     """
-    Aplikuje CHART_LAYOUT na figuru a BEZPEČNĚ merguje xaxis/yaxis defaulty.
+    Vrátí dict pro `fig.update_layout(**apply_chart_defaults(...))`.
 
+    Aplikuje CHART_LAYOUT a BEZPEČNĚ merguje xaxis/yaxis defaulty.
     Řeší problém: `fig.update_layout(**CHART_LAYOUT, xaxis=..., yaxis=...)`
     by vyhodil TypeError na duplicitní klíč, pokud by CHART_LAYOUT obsahoval
     xaxis/yaxis. Tato funkce to obchází.
 
     Použití:
-        fig.update_layout(**apply_chart_layout_kwargs(
+        fig.update_layout(**apply_chart_defaults(
             xaxis=dict(type='category'),
             yaxis=dict(title='Počet'),
             title='Můj graf'
@@ -73,11 +74,14 @@ def apply_chart_defaults(fig, **overrides):
     import copy
     layout = copy.deepcopy(CHART_LAYOUT)
 
-    # Extrahuj xaxis/yaxis z overrides (pokud jsou)
-    xaxis_override = overrides.pop('xaxis', None)
-    yaxis_override = overrides.pop('yaxis', None)
-    yaxis2_override = overrides.pop('yaxis2', None)
-    yaxis3_override = overrides.pop('yaxis3', None)
+    # KLÍČOVÉ: Zachovej kopii overrides PŘED modifikací
+    extra_overrides = dict(overrides)
+
+    # Extrahuj xaxis/yaxis/yaxis2/yaxis3 z extra_overrides (pokud jsou)
+    xaxis_override = extra_overrides.pop('xaxis', None)
+    yaxis_override = extra_overrides.pop('yaxis', None)
+    yaxis2_override = extra_overrides.pop('yaxis2', None)
+    yaxis3_override = extra_overrides.pop('yaxis3', None)
 
     # Merge defaultů s override
     final_xaxis = {**CHART_XAXIS_DEFAULTS, **(xaxis_override or {})}
@@ -91,8 +95,8 @@ def apply_chart_defaults(fig, **overrides):
     if yaxis3_override:
         layout['yaxis3'] = yaxis3_override
 
-    # Přidej všechny ostatní overrides
-    layout.update(overrides)
+    # Přidej všechny ostatní overrides (title, height, barmode, atd.)
+    layout.update(extra_overrides)
     return layout
 
 # Popisky typů front
