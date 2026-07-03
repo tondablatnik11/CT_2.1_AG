@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from modules.utils import t, QUEUE_DESC, CHART_LAYOUT, CHART_COLORS
+from modules.utils import t, QUEUE_DESC, CHART_LAYOUT, CHART_COLORS, apply_chart_defaults
 from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
 
 
@@ -253,10 +253,11 @@ def _render_trend_chart(df_pick, queue_count_col, _t):
             ))
 
         fig.update_layout(
-            **CHART_LAYOUT,
-            barmode='group',
-            yaxis=dict(title=_t("Celkový počet TO", "Total TOs")),
-            yaxis2=dict(title=_t("Průměr pohybů na lokaci", "Avg Moves per Location"),
-                        side="right", overlaying="y", showgrid=False),
+            **apply_chart_defaults(
+                barmode='group',
+                yaxis=dict(title=_t("Celkový počet TO", "Total TOs")),
+                yaxis2=dict(title=_t("Průměr pohybů na lokaci", "Avg Moves per Location"),
+                            side="right", overlaying="y", showgrid=False),
+            )
         )
         st.plotly_chart(fig, width="stretch")

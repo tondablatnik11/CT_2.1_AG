@@ -49,6 +49,24 @@ def render_fu(df_pick, queue_count_col):
         _t('Paleta', 'Pallet')
     )
 
+    # === KLÍČOVÉ HELPER SLOUPCE - přidány zde, aby byly dostupné všude ===
+    # _clean_del a _pick_hu se používají v efficiency analýze i v X-Ray
+    if '_clean_del' not in fu_df.columns and 'Delivery' in fu_df.columns:
+        fu_df['_clean_del'] = fu_df['Delivery'].apply(safe_del)
+
+    if '_pick_hu' not in fu_df.columns:
+        hu_ext = fu_df.get('Handling Unit', pd.Series([''] * len(fu_df))).fillna('').astype(str).apply(safe_hu)
+        ssu = fu_df.get('Source storage unit', pd.Series([''] * len(fu_df))).fillna('').astype(str).apply(safe_hu)
+        pick_hu = np.where(
+            (ssu.values != '') & (hu_ext.values != '') & (ssu.values == hu_ext.values),
+            ssu.values,
+            np.where(ssu.values != '', ssu.values, hu_ext.values)
+        )
+        fu_df['_pick_hu'] = pick_hu
+
+    if 'Has_X' not in fu_df.columns:
+        fu_df['Has_X'] = fu_df['Removal of total SU'].astype(str).str.strip().str.upper() == 'X'
+
     # === 1) MĚSÍČNÍ PODÍL PALET VS KARTONŮ ===
     _render_monthly_su_breakdown(fu_df, c_su, _t)
 
@@ -209,21 +227,21 @@ def _render_vollpalette_analysis(df_pick, fu_df, c_su, queue_count_col, _t):
 
         with tabs[0]:
             st.markdown(_t("Analýza **čistých paletových zakázek**.", "Analysis of **pure pallet orders**."))
-            _render_efficiency_view(df_pure_combo, queue_count_col, _t,
+            _render_efficiency_view(df_pure_combo, queue_count_col, _t, c_su,
                                     is_pure=True, label=_t("Čisté FU/FUOE", "Pure FU/FUOE"))
 
         with tabs[1]:
             st.markdown(_t("Analýza zakázek **pouze PI_PL_FU**.", "Orders with **exclusively PI_PL_FU**."))
-            _render_efficiency_view(df_only_fu, queue_count_col, _t,
+            _render_efficiency_view(df_only_fu, queue_count_col, _t, c_su,
                                     is_pure=True, label=_t("Pouze FU", "Only FU"))
 
         with tabs[2]:
             st.markdown(_t("Analýza zakázek **pouze PI_PL_FUOE**.", "Orders with **exclusively PI_PL_FUOE**."))
-            _render_efficiency_view(df_only_fuoe, queue_count_col, _t,
+            _render_efficiency_view(df_only_fuoe, queue_count_col, _t, c_su,
                                     is_pure=True, label=_t("Pouze FUOE", "Only FUOE"))
 
 
-def _render_efficiency_view(df_view, queue_count_col, _t, is_pure=False, label=""):
+def _render_efficiency_view(df_view, queue_count_col, _t, c_su=None, is_pure=False, label=""):
     """Detailní pohled na efektivitu - tabulka + grafy + X-Ray seznamy."""
     if df_view.empty:
         st.info(_t(f"V této kategorii ({label}) nebyly nalezeny žádné záznamy.",

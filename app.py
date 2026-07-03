@@ -583,6 +583,22 @@ def fetch_and_prep_data(use_marm: bool = True):
             except (TypeError, ValueError):
                 pass
 
+    # === DŮLEŽITÉ: Přidání sloupců, které potřebují tab moduly ===
+    # Month - agregace období pro grafy a filtry
+    if 'Date' in df_pick.columns and 'Month' not in df_pick.columns:
+        try:
+            df_pick['Month'] = df_pick['Date'].dt.to_period('M').astype(str).replace('NaT', 'Neznámé')
+        except Exception as e:
+            logger.warning(f"Nelze vytvořit Month sloupec: {e}")
+            df_pick['Month'] = 'Neznámé'
+
+    # Clean_Del a _clean_del - normalizované Delivery klíče pro spojování s VEKP/VEPO
+    if 'Clean_Del' not in df_pick.columns and 'Delivery' in df_pick.columns:
+        try:
+            df_pick['Clean_Del'] = df_pick['Delivery'].apply(safe_del)
+        except Exception as e:
+            logger.warning(f"Nelze vytvořit Clean_Del: {e}")
+
     elapsed = time.time() - start_time
     logger.info(
         f"fetch_and_prep_data hotovo: {len(df_pick):,} řádků (z {initial_rows:,} původních), "

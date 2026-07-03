@@ -5,7 +5,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from modules.utils import t, CHART_LAYOUT, CHART_COLORS
+from modules.utils import t, CHART_LAYOUT, CHART_COLORS, apply_chart_defaults
 from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
 
 
@@ -129,11 +129,13 @@ def _make_bar_chart(df, x_col, y_col, title, color='#3b82f6'):
         textposition='auto',
         name=title,
     ))
-    fig.update_layout(**CHART_LAYOUT_LOCAL)
     fig.update_layout(
-        title=title,
-        xaxis_title="Materiál", yaxis_title="",
-        xaxis=dict(type='category')
+        **apply_chart_defaults(
+            title=title,
+            xaxis=dict(type='category'),
+            xaxis_title="Materiál",
+            yaxis_title="",
+        )
     )
     return fig
 

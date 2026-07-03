@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from modules.utils import t, CHART_LAYOUT, CHART_COLORS, safe_del, safe_hu
+from modules.utils import t, CHART_LAYOUT, CHART_COLORS, apply_chart_defaults, safe_del, safe_hu
 from modules.safe_render import ErrorBoundary, validate_dataframe
 
 try:
@@ -194,12 +194,13 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
         ))
 
         fig_trend.update_layout(
-            **CHART_LAYOUT,
-            yaxis=dict(title=_t('TO', 'TOs')),
-            yaxis2=dict(title=_t('Kusy / TO', 'Pcs / TO'), overlaying='y', side='right', showgrid=False),
-            yaxis3=dict(title=_t('% Přesně', '% Exact'), overlaying='y', side='right', position=0.92, showgrid=False, range=[0, 105]),
-            title=None,
-            height=450,
+            **apply_chart_defaults(
+                yaxis=dict(title=_t('TO', 'TOs')),
+                yaxis2=dict(title=_t('Kusy / TO', 'Pcs / TO'), overlaying='y', side='right', showgrid=False),
+                yaxis3=dict(title=_t('% Přesně', '% Exact'), overlaying='y', side='right', position=0.92, showgrid=False, range=[0, 105]),
+                title=None,
+                height=450,
+            )
         )
         st.plotly_chart(fig_trend, width="stretch")
 

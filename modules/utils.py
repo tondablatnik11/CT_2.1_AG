@@ -44,9 +44,56 @@ CHART_LAYOUT = dict(
     legend=dict(orientation='h', yanchor='bottom', y=1.05, xanchor='left', x=0, bgcolor='rgba(0,0,0,0)'),
     hovermode="x unified",
     hoverlabel=dict(bgcolor="rgba(15, 23, 42, 0.9)", font_size=13, font_family="'Plus Jakarta Sans', sans-serif"),
-    xaxis=dict(showgrid=False, zeroline=False),
-    yaxis=dict(gridcolor='rgba(255, 255, 255, 0.05)', gridwidth=1, zerolinecolor='rgba(255, 255, 255, 0.1)')
 )
+
+# Defaulty pro osy - aplikují se POUZE pokud nejsou přepsány
+CHART_XAXIS_DEFAULTS = dict(showgrid=False, zeroline=False)
+CHART_YAXIS_DEFAULTS = dict(
+    gridcolor='rgba(255, 255, 255, 0.05)',
+    gridwidth=1,
+    zerolinecolor='rgba(255, 255, 255, 0.1)'
+)
+
+
+def apply_chart_defaults(fig, **overrides):
+    """
+    Aplikuje CHART_LAYOUT na figuru a BEZPEČNĚ merguje xaxis/yaxis defaulty.
+
+    Řeší problém: `fig.update_layout(**CHART_LAYOUT, xaxis=..., yaxis=...)`
+    by vyhodil TypeError na duplicitní klíč, pokud by CHART_LAYOUT obsahoval
+    xaxis/yaxis. Tato funkce to obchází.
+
+    Použití:
+        fig.update_layout(**apply_chart_layout_kwargs(
+            xaxis=dict(type='category'),
+            yaxis=dict(title='Počet'),
+            title='Můj graf'
+        ))
+    """
+    import copy
+    layout = copy.deepcopy(CHART_LAYOUT)
+
+    # Extrahuj xaxis/yaxis z overrides (pokud jsou)
+    xaxis_override = overrides.pop('xaxis', None)
+    yaxis_override = overrides.pop('yaxis', None)
+    yaxis2_override = overrides.pop('yaxis2', None)
+    yaxis3_override = overrides.pop('yaxis3', None)
+
+    # Merge defaultů s override
+    final_xaxis = {**CHART_XAXIS_DEFAULTS, **(xaxis_override or {})}
+    final_yaxis = {**CHART_YAXIS_DEFAULTS, **(yaxis_override or {})}
+
+    layout['xaxis'] = final_xaxis
+    layout['yaxis'] = final_yaxis
+
+    if yaxis2_override:
+        layout['yaxis2'] = yaxis2_override
+    if yaxis3_override:
+        layout['yaxis3'] = yaxis3_override
+
+    # Přidej všechny ostatní overrides
+    layout.update(overrides)
+    return layout
 
 # Popisky typů front
 QUEUE_DESC = {
