@@ -11,28 +11,35 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 import datetime
 import io
 import logging
 from database import load_from_db
 from modules.utils import safe_hu
-from modules.safe_render import ErrorBoundary, validate_dataframe
+from modules.safe_render import validate_dataframe
 
 logger = logging.getLogger("warehouse.tab_daily_kpi")
 
+# Import na úrovni modulu - pokud selže, chceme to vědět hned
 try:
-    fast_render = st.fragment
-except AttributeError:
-    fast_render = lambda f: f
+    from modules.tab_billing import cached_billing_logic_v28
+    BILLING_AVAILABLE = True
+    logger.info("cached_billing_logic_v28 importován úspěšně")
+except Exception as e:
+    BILLING_AVAILABLE = False
+    cached_billing_logic_v28 = None
+    logger.warning(f"cached_billing_logic_v28 nelze importovat: {e}")
 
 
 def render_daily_kpi(df_pick, raw_vekp):
-    """Hlavní renderer Denní KPI - obalený v try/except pro stabilitu."""
+    """Hlavní renderer Denní KPI - kompletně chráněný proti všem výjimkám."""
+    logger.info(f"render_daily_kpi START (df_pick={'OK' if df_pick is not None else None}, raw_vekp={'OK' if raw_vekp is not None else None})")
     try:
-        return _render_daily_kpi_inner(df_pick, raw_vekp)
+        result = _render_daily_kpi_inner(df_pick, raw_vekp)
+        logger.info("render_daily_kpi OK")
+        return result
     except Exception as e:
-        logger.exception("Chyba v render_daily_kpi")
+        logger.exception(f"Chyba v render_daily_kpi: {e}")
         st.error(
             f"⚠️ **Chyba při vykreslování Denní KPI**\n\n"
             f"Typ: `{type(e).__name__}`\n"
@@ -41,6 +48,19 @@ def render_daily_kpi(df_pick, raw_vekp):
         with st.expander("🔧 Technické detaily"):
             import traceback
             st.code(traceback.format_exc(), language="python")
+
+
+def _safe_groupby_size(df, col, _t):
+    """Bezpečný groupby size s try/except."""
+    try:
+        if df.empty or col not in df.columns:
+            return pd.DataFrame()
+        agg = df.groupby(col, observed=True).size().reset_index(name='Count').sort_values('Count', ascending=False)
+        agg.columns = [col, _t('Počet', 'Count')]
+        return agg
+    except Exception as e:
+        logger.warning(f"groupby failed: {e}")
+        return pd.DataFrame()
 
 
 def _render_daily_kpi_inner(df_pick, raw_vekp):
@@ -92,7 +112,7 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
         unsafe_allow_html=True
     )
 
-    # === VÝBĚR DATA (mimo fragment - stabilní) ===
+    # === VÝBĚR DATA ===
     col_date, _ = st.columns([1, 3])
     with col_date:
         default_date = datetime.date.today() - datetime.timedelta(days=1)
@@ -105,101 +125,76 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
     sel_date_str = selected_date.strftime('%Y-%m-%d')
     sel_date_str_nodash = selected_date.strftime('%Y%m%d')
 
-    # === HEADCOUNT VSTUPY (mimo fragment) ===
-    if 'daily_kpi_inputs' not in st.session_state:
-        st.session_state.daily_kpi_inputs = {
-            'hc_r_in': 0.0, 'hc_r_pick': 0.0, 'hc_r_pack': 0.0,
-            'hc_o_in': 0.0, 'hc_o_pick': 0.0, 'hc_o_pack': 0.0,
-        }
-
+    # === HEADCOUNT ===
     hc_c1, hc_c2 = st.columns(2)
     with hc_c1:
         st.info(f"**☀️ {_t('Ranní směna', 'Morning Shift')} (5:45 - 13:45)**")
-        hc_r_in = st.number_input(
-            _t("Příjem (Inbound) - Ranní", "Inbound - Morning"),
-            min_value=0.0, step=0.5, key="hc_r_in"
-        )
-        hc_r_pick = st.number_input(
-            _t("Pickování - Ranní", "Picking - Morning"),
-            min_value=0.0, step=0.5, key="hc_r_pick"
-        )
-        hc_r_pack = st.number_input(
-            _t("Balení - Ranní", "Packing - Morning"),
-            min_value=0.0, step=0.5, key="hc_r_pack"
-        )
+        hc_r_in = st.number_input(_t("Příjem - Ranní", "Inbound - Morning"), min_value=0.0, step=0.5, key="hc_r_in")
+        hc_r_pick = st.number_input(_t("Pickování - Ranní", "Picking - Morning"), min_value=0.0, step=0.5, key="hc_r_pick")
+        hc_r_pack = st.number_input(_t("Balení - Ranní", "Packing - Morning"), min_value=0.0, step=0.5, key="hc_r_pack")
     with hc_c2:
         st.warning(f"**🌆 {_t('Odpolední směna', 'Afternoon Shift')} (13:45 - 21:45)**")
-        hc_o_in = st.number_input(
-            _t("Příjem - Odpolední", "Inbound - Afternoon"),
-            min_value=0.0, step=0.5, key="hc_o_in"
-        )
-        hc_o_pick = st.number_input(
-            _t("Pickování - Odpolední", "Picking - Afternoon"),
-            min_value=0.0, step=0.5, key="hc_o_pick"
-        )
-        hc_o_pack = st.number_input(
-            _t("Balení - Odpolední", "Packing - Afternoon"),
-            min_value=0.0, step=0.5, key="hc_o_pack"
-        )
+        hc_o_in = st.number_input(_t("Příjem - Odpolední", "Inbound - Afternoon"), min_value=0.0, step=0.5, key="hc_o_in")
+        hc_o_pick = st.number_input(_t("Pickování - Odpolední", "Picking - Afternoon"), min_value=0.0, step=0.5, key="hc_o_pick")
+        hc_o_pack = st.number_input(_t("Balení - Odpolední", "Packing - Afternoon"), min_value=0.0, step=0.5, key="hc_o_pack")
 
     st.divider()
 
     # === ZPRACOVÁNÍ PICK DAT ===
     pick_daily = pd.DataFrame()
+    time_col = None
+
     if df_pick is not None and not df_pick.empty:
         try:
             df_p = df_pick.copy()
             date_col = next(
-                (c for c in df_p.columns if 'confirm' in str(c).lower() or 'bestät' in str(c).lower() or 'potvrz' in str(c).lower()),
+                (c for c in df_p.columns if any(k in str(c).lower() for k in ['confirm', 'bestät', 'potvrz', 'creation'])),
                 None
             )
             if not date_col:
                 date_col = next((c for c in df_p.columns if 'date' in str(c).lower() or 'datum' in str(c).lower()), None)
+
             time_col = next(
-                (c for c in df_p.columns if 'time' in str(c).lower() or 'zeit' in str(c).lower() or 'čas' in str(c).lower() or 'cas' in str(c).lower()),
+                (c for c in df_p.columns if any(k in str(c).lower() for k in ['time', 'zeit', 'čas', 'cas'])),
                 None
             )
 
             if date_col and time_col:
+                logger.info(f"Pick: date_col={date_col}, time_col={time_col}")
                 df_p['TempDate'] = pd.to_datetime(df_p[date_col], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
                 pick_daily = df_p[df_p['TempDate'] == sel_date_str].copy()
+                logger.info(f"Pick daily: {len(pick_daily)} řádků pro {sel_date_str}")
+
                 if not pick_daily.empty:
-                    # Vektorové varianty get_shift/get_hour
+                    # Cache pro get_shift/get_hour (výkon)
                     _shift_cache = {}
                     _hour_cache = {}
 
                     def _safe_shift(v):
                         s = str(v).strip() if not pd.isna(v) else ""
-                        r = _shift_cache.get(s)
-                        if r is None:
-                            r = get_shift(v)
-                            _shift_cache[s] = r
-                        return r
+                        if s not in _shift_cache:
+                            _shift_cache[s] = get_shift(v)
+                        return _shift_cache[s]
 
                     def _safe_hour(v):
                         s = str(v).strip() if not pd.isna(v) else ""
-                        r = _hour_cache.get(s, -999)
-                        if r == -999:
-                            r = get_hour(v)
-                            _hour_cache[s] = r
-                        return r
+                        if s not in _hour_cache:
+                            _hour_cache[s] = get_hour(v)
+                        return _hour_cache[s]
 
                     pick_daily['Shift'] = pick_daily[time_col].apply(_safe_shift)
                     pick_daily['Hour'] = pick_daily[time_col].apply(_safe_hour)
                     pick_daily['Category'] = pick_daily.get('Queue', _t('Neznámá fronta', 'Unknown Queue'))
         except Exception as e:
-            logger.warning(f"Chyba při zpracování Pick dat pro Denní KPI: {e}")
+            logger.exception(f"Chyba při zpracování Pick dat: {e}")
 
-    # === ZPRACOVÁNÍ PACK DAT (s BILLING logikou) ===
+    # === ZPRACOVÁNÍ PACK DAT ===
     pack_daily = pd.DataFrame()
-    pack_date_col = None
     pack_time_col = None
 
-    # Pokus o BILLING integraci - izolovaný v try/except
-    if raw_vekp is not None and not raw_vekp.empty:
+    if raw_vekp is not None and not raw_vekp.empty and BILLING_AVAILABLE:
         try:
-            from modules.tab_billing import cached_billing_logic_v28
-
+            logger.info("Pack: startuji BILLING logiku")
             df_vepo = load_from_db('raw_vepo')
             df_cats = load_from_db('raw_cats')
             voll_set = st.session_state.get('voll_set') or set()
@@ -208,49 +203,57 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
             if df_pick is not None and not df_pick.empty and 'Transfer Order Number' in df_pick.columns:
                 qc_col = 'Transfer Order Number'
 
-            _, df_hu_details = cached_billing_logic_v28(
-                df_pick, raw_vekp, df_vepo, df_cats, qc_col, voll_set
-            )
+            try:
+                _, df_hu_details = cached_billing_logic_v28(
+                    df_pick, raw_vekp, df_vepo, df_cats, qc_col, voll_set
+                )
+                logger.info(f"BILLING OK: {len(df_hu_details) if df_hu_details is not None else 0} HU details")
+            except Exception as billing_err:
+                logger.exception(f"BILLING logika selhala: {billing_err}")
+                df_hu_details = pd.DataFrame()
 
             if df_hu_details is not None and not df_hu_details.empty:
-                df_v = raw_vekp.copy()
-                c_hu_int = next(
-                    (c for c in df_v.columns if "Internal HU" in str(c) or "HU-Nummer intern" in str(c)),
-                    df_v.columns[0]
-                )
-                pack_date_col = next(
-                    (c for c in df_v.columns if 'CREATED ON' in str(c).upper() or 'ERFASST AM' in str(c).upper() or 'VYTVOŘENO' in str(c).upper()),
-                    None
-                )
-                pack_time_col = next(
-                    (c for c in df_v.columns if 'TIME' in str(c).upper() or 'UHRZEIT' in str(c).upper() or 'ČAS' in str(c).upper()),
-                    None
-                )
-
-                if pack_date_col and pack_time_col:
-                    df_v['Clean_HU_Int'] = df_v[c_hu_int].apply(safe_hu)
-                    df_hu_details['Clean_HU_Int'] = df_hu_details['HU_Int'].apply(safe_hu)
-
-                    pack_merged = pd.merge(
-                        df_hu_details[['Clean_HU_Int', 'Category_Full']],
-                        df_v[['Clean_HU_Int', pack_date_col, pack_time_col]],
-                        on='Clean_HU_Int',
-                        how='inner'
+                try:
+                    df_v = raw_vekp.copy()
+                    c_hu_int = next(
+                        (c for c in df_v.columns if "Internal HU" in str(c) or "HU-Nummer intern" in str(c)),
+                        df_v.columns[0]
                     )
-                    pack_merged = pack_merged.drop_duplicates('Clean_HU_Int')
-                    pack_merged['TempDate'] = pd.to_datetime(
-                        pack_merged[pack_date_col], errors='coerce'
-                    ).dt.strftime('%Y-%m-%d')
-                    pack_daily = pack_merged[pack_merged['TempDate'] == sel_date_str].copy()
+                    pack_date_col = next(
+                        (c for c in df_v.columns if any(k in str(c).upper() for k in ['CREATED ON', 'ERFASST AM', 'VYTVOŘENO'])),
+                        None
+                    )
+                    pack_time_col = next(
+                        (c for c in df_v.columns if any(k in str(c).upper() for k in ['TIME', 'UHRZEIT', 'ČAS'])),
+                        None
+                    )
 
-                    if not pack_daily.empty:
-                        pack_daily['Shift'] = pack_daily[pack_time_col].apply(get_shift)
-                        pack_daily['Hour'] = pack_daily[pack_time_col].apply(get_hour)
-                        pack_daily['Category'] = pack_daily['Category_Full']
+                    if pack_date_col and pack_time_col:
+                        df_v['Clean_HU_Int'] = df_v[c_hu_int].apply(safe_hu)
+                        df_hu_details['Clean_HU_Int'] = df_hu_details['HU_Int'].apply(safe_hu)
+
+                        pack_merged = pd.merge(
+                            df_hu_details[['Clean_HU_Int', 'Category_Full']],
+                            df_v[['Clean_HU_Int', pack_date_col, pack_time_col]],
+                            on='Clean_HU_Int',
+                            how='inner'
+                        )
+                        pack_merged = pack_merged.drop_duplicates('Clean_HU_Int')
+                        pack_merged['TempDate'] = pd.to_datetime(
+                            pack_merged[pack_date_col], errors='coerce'
+                        ).dt.strftime('%Y-%m-%d')
+                        pack_daily = pack_merged[pack_merged['TempDate'] == sel_date_str].copy()
+                        logger.info(f"Pack daily: {len(pack_daily)} HU pro {sel_date_str}")
+
+                        if not pack_daily.empty:
+                            pack_daily['Shift'] = pack_daily[pack_time_col].apply(get_shift)
+                            pack_daily['Hour'] = pack_daily[pack_time_col].apply(get_hour)
+                            pack_daily['Category'] = pack_daily['Category_Full']
+                except Exception as merge_err:
+                    logger.exception(f"Chyba při merge BILLING+VEKP: {merge_err}")
+                    pack_daily = pd.DataFrame()
         except Exception as e:
-            logger.warning(f"Chyba při BILLING integraci v Denní KPI: {e}")
-            # Fallback - pouze VEKP bez kategorií
-            pack_daily = pd.DataFrame()
+            logger.exception(f"Chyba v Pack dat: {e}")
 
     # === VÝSLEDKY A PRODUKTIVITA ===
     st.markdown(f"### 📈 {_t('Výsledky za den:', 'Results for:')} {selected_date.strftime('%d.%m.%Y')}")
@@ -268,7 +271,7 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
         )
 
     with kpi_c2:
-        total_pick = pick_daily.shape[0] if not pick_daily.empty else 0
+        total_pick = len(pick_daily) if not pick_daily.empty else 0
         st.markdown(
             f"<div style='background-color:var(--secondary-background-color); padding:15px; "
             f"border-radius:8px; border-left:5px solid #3b82f6;'>"
@@ -278,29 +281,31 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
             unsafe_allow_html=True
         )
         if not pick_daily.empty:
-            r_pick = int((pick_daily['Shift'].str.startswith(_t('Ranní', 'Morning'))).sum())
-            o_pick = int((pick_daily['Shift'].str.startswith(_t('Odpolední', 'Afternoon'))).sum())
-            st.write(
-                f"**{_t('Ranní', 'Morning')}:** {r_pick} TO "
-                f"*({_t('Produktivita:', 'Productivity:')} "
-                f"{r_pick / hc_r_pick if hc_r_pick > 0 else 0:.1f} / {_t('hlava', 'head')})*"
-            )
-            st.write(
-                f"**{_t('Odpolední', 'Afternoon')}:** {o_pick} TO "
-                f"*({_t('Produktivita:', 'Productivity:')} "
-                f"{o_pick / hc_o_pick if hc_o_pick > 0 else 0:.1f} / {_t('hlava', 'head')})*"
-            )
-            st.markdown("---")
-            st.markdown(f"**{_t('Rozpad podle front (Queue):', 'Breakdown by Queue:')}**")
             try:
-                q_df = pick_daily.groupby('Category', observed=True).size().reset_index(name='TO').sort_values('TO', ascending=False)
-                q_df.columns = [_t('Fronta (Queue)', 'Queue'), _t('Počet TO', 'Number of TOs')]
-                st.dataframe(q_df, hide_index=True, width="stretch")
-            except Exception:
-                pass
+                shift_col = pick_daily['Shift'].astype(str)
+                r_pick = int(shift_col.str.startswith(_t('Ranní', 'Morning')).sum())
+                o_pick = int(shift_col.str.startswith(_t('Odpolední', 'Afternoon')).sum())
+                st.write(
+                    f"**{_t('Ranní', 'Morning')}:** {r_pick} TO "
+                    f"*({_t('Produktivita:', 'Productivity:')} "
+                    f"{r_pick / hc_r_pick if hc_r_pick > 0 else 0:.1f} / {_t('hlava', 'head')})*"
+                )
+                st.write(
+                    f"**{_t('Odpolední', 'Afternoon')}:** {o_pick} TO "
+                    f"*({_t('Produktivita:', 'Productivity:')} "
+                    f"{o_pick / hc_o_pick if hc_o_pick > 0 else 0:.1f} / {_t('hlava', 'head')})*"
+                )
+                st.markdown("---")
+                st.markdown(f"**{_t('Rozpad podle front (Queue):', 'Breakdown by Queue:')}**")
+                q_df = _safe_groupby_size(pick_daily, 'Category', _t)
+                if not q_df.empty:
+                    q_df.columns = [_t('Fronta (Queue)', 'Queue'), _t('Počet TO', 'Number of TOs')]
+                    st.dataframe(q_df, hide_index=True, width="stretch")
+            except Exception as e:
+                logger.warning(f"Pick render selhal: {e}")
 
     with kpi_c3:
-        total_pack = pack_daily.shape[0] if not pack_daily.empty else 0
+        total_pack = len(pack_daily) if not pack_daily.empty else 0
         st.markdown(
             f"<div style='background-color:var(--secondary-background-color); padding:15px; "
             f"border-radius:8px; border-left:5px solid #8b5cf6;'>"
@@ -310,26 +315,33 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
             unsafe_allow_html=True
         )
         if not pack_daily.empty and pack_time_col:
-            r_pack = int((pack_daily['Shift'].str.startswith(_t('Ranní', 'Morning'))).sum())
-            o_pack = int((pack_daily['Shift'].str.startswith(_t('Odpolední', 'Afternoon'))).sum())
-            st.write(
-                f"**{_t('Ranní', 'Morning')}:** {r_pack} HU "
-                f"*({_t('Produktivita:', 'Productivity:')} "
-                f"{r_pack / hc_r_pack if hc_r_pack > 0 else 0:.1f} / {_t('hlava', 'head')})*"
-            )
-            st.write(
-                f"**{_t('Odpolední', 'Afternoon')}:** {o_pack} HU "
-                f"*({_t('Produktivita:', 'Productivity:')} "
-                f"{o_pack / hc_o_pack if hc_o_pack > 0 else 0:.1f} / {_t('hlava', 'head')})*"
-            )
-            st.markdown("---")
-            st.markdown(f"**{_t('Rozpad podle kategorií:', 'Breakdown by Category:')}**")
             try:
-                c_df = pack_daily.groupby('Category', observed=True).size().reset_index(name='HU').sort_values('HU', ascending=False)
-                c_df.columns = [_t('Kategorie', "Category"), _t('Počet HU', 'Number of HUs')]
-                st.dataframe(c_df, hide_index=True, width="stretch")
-            except Exception:
-                pass
+                shift_col = pack_daily['Shift'].astype(str)
+                r_pack = int(shift_col.str.startswith(_t('Ranní', 'Morning')).sum())
+                o_pack = int(shift_col.str.startswith(_t('Odpolední', 'Afternoon')).sum())
+                st.write(
+                    f"**{_t('Ranní', 'Morning')}:** {r_pack} HU "
+                    f"*({_t('Produktivita:', 'Productivity:')} "
+                    f"{r_pack / hc_r_pack if hc_r_pack > 0 else 0:.1f} / {_t('hlava', 'head')})*"
+                )
+                st.write(
+                    f"**{_t('Odpolední', 'Afternoon')}:** {o_pack} HU "
+                    f"*({_t('Produktivita:', 'Productivity:')} "
+                    f"{o_pack / hc_o_pack if hc_o_pack > 0 else 0:.1f} / {_t('hlava', 'head')})*"
+                )
+                st.markdown("---")
+                st.markdown(f"**{_t('Rozpad podle kategorií:', 'Breakdown by Category:')}**")
+                c_df = _safe_groupby_size(pack_daily, 'Category', _t)
+                if not c_df.empty:
+                    c_df.columns = [_t('Kategorie', 'Category'), _t('Počet HU', 'Number of HUs')]
+                    st.dataframe(c_df, hide_index=True, width="stretch")
+            except Exception as e:
+                logger.warning(f"Pack render selhal: {e}")
+        elif not BILLING_AVAILABLE:
+            st.caption(_t(
+                "⚠️ Billing logika není dostupná - pack data se nezobrazí.",
+                "⚠️ Billing logic not available - pack data won't display."
+            ))
 
     st.divider()
 
@@ -374,7 +386,7 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
             )
             st.plotly_chart(fig, width="stretch")
         except Exception as e:
-            st.info(_t("Hodinový graf se nepodařilo vykreslit.", "Hourly chart could not be rendered."))
+            logger.warning(f"Hodinový graf selhal: {e}")
     else:
         st.info(_t(
             "Zatím žádná data pro hodinový graf v tento den.",
@@ -391,15 +403,15 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
     ))
 
     pbi_rows = []
-    if not pick_daily.empty:
+    if not pick_daily.empty and time_col:
         for _, row in pick_daily.iterrows():
             pbi_rows.append({
                 'Date': sel_date_str,
-                'Time': row.get(time_col, '') if 'time_col' in dir() else '',
+                'Time': str(row.get(time_col, '')),
                 'Hour': int(row.get('Hour', -1)),
-                'Shift': row.get('Shift', ''),
+                'Shift': str(row.get('Shift', '')),
                 'Process': 'Pick',
-                'Category': row.get('Category', ''),
+                'Category': str(row.get('Category', '')),
                 'Value': 1,
                 'Unit': 'TO'
             })
@@ -408,33 +420,36 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
         for _, row in pack_daily.iterrows():
             pbi_rows.append({
                 'Date': sel_date_str,
-                'Time': row.get(pack_time_col, ''),
+                'Time': str(row.get(pack_time_col, '')),
                 'Hour': int(row.get('Hour', -1)),
-                'Shift': row.get('Shift', ''),
+                'Shift': str(row.get('Shift', '')),
                 'Process': 'Pack',
-                'Category': row.get('Category', ''),
+                'Category': str(row.get('Category', '')),
                 'Value': 1,
                 'Unit': 'HU'
             })
 
     if pbi_rows:
-        df_pbi = pd.DataFrame(pbi_rows)
-        df_pbi = df_pbi[df_pbi['Hour'] >= 0]
+        try:
+            df_pbi = pd.DataFrame(pbi_rows)
+            df_pbi = df_pbi[df_pbi['Hour'] >= 0]
 
-        st.dataframe(df_pbi.head(3), width="stretch")
+            st.dataframe(df_pbi.head(3), width="stretch")
 
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_pbi.to_excel(writer, index=False, sheet_name='PBI_Export')
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df_pbi.to_excel(writer, index=False, sheet_name='PBI_Export')
 
-        st.download_button(
-            label=_t("⬇️ Stáhnout Flat Table pro Power BI (.xlsx)",
-                     "⬇️ Download Flat Table for Power BI (.xlsx)"),
-            data=buffer.getvalue(),
-            file_name=f"PowerBI_Export_{sel_date_str_nodash}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary"
-        )
+            st.download_button(
+                label=_t("⬇️ Stáhnout Flat Table pro Power BI (.xlsx)",
+                         "⬇️ Download Flat Table for Power BI (.xlsx)"),
+                data=buffer.getvalue(),
+                file_name=f"PowerBI_Export_{sel_date_str_nodash}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
+        except Exception as e:
+            logger.warning(f"Power BI export selhal: {e}")
     else:
         st.warning(_t(
             "Data pro Power BI nejsou pro vybraný den k dispozici.",
