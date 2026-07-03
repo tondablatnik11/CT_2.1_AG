@@ -158,13 +158,13 @@ def _render_top_moves(mat_agg, _t):
 
     col_t1, col_g1 = st.columns([1.1, 1])
     with col_t1:
-        st.dataframe(_format_table(top_moves), use_container_width=True, hide_index=True)
+        st.dataframe(_format_table(top_moves), width="stretch", hide_index=True)
     with col_g1:
         st.plotly_chart(
             _make_bar_chart(top_moves.head(15), 'Material', 'Moves',
                             _t("TOP 15 dle fyzických pohybů", "TOP 15 by Physical Moves"),
                             '#3b82f6'),
-            use_container_width=True
+            width="stretch"
         )
 
 
@@ -187,13 +187,13 @@ def _render_top_tos(mat_agg, _t):
 
     col_t2, col_g2 = st.columns([1.1, 1])
     with col_t2:
-        st.dataframe(_format_table(top_tos), use_container_width=True, hide_index=True)
+        st.dataframe(_format_table(top_tos), width="stretch", hide_index=True)
     with col_g2:
         st.plotly_chart(
             _make_bar_chart(top_tos.head(15), 'Material', 'TO_Count',
                             _t("TOP 15 dle počtu zakázek (TO)", "TOP 15 by Order Count"),
                             '#10b981'),
-            use_container_width=True
+            width="stretch"
         )
 
 
@@ -234,9 +234,9 @@ def _render_top_estimates(mat_agg, _t):
 
     col_t3, col_g3 = st.columns([1.1, 1])
     with col_t3:
-        st.dataframe(_format_table(top_est), use_container_width=True, hide_index=True)
+        st.dataframe(_format_table(top_est), width="stretch", hide_index=True)
     with col_g3:
         st.plotly_chart(
             _make_bar_chart(top_est.head(15), 'Material', y_col_chart, chart_title, chart_color),
-            use_container_width=True
+            width="stretch"
         )

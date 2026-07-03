@@ -57,13 +57,32 @@ def get_supabase_client() -> Optional[Client]:
     return _init_supabase()
 
 
+def _is_not_found_error(exc: Exception) -> bool:
+    """Detekuje 404 / not_found chyby ze Supabase (soubor neexistuje)."""
+    exc_str = str(exc).lower()
+    # Hledáme typické markery pro "soubor neexistuje"
+    return any(marker in exc_str for marker in [
+        '"statuscode": 404', 'not found', 'object not found',
+        '"error": "not_found"', '"status_code": 404', '404 not found',
+    ])
+
+
 def _retry_operation(operation, *args, max_retries: int = MAX_RETRIES, **kwargs):
-    """Společná retry logika pro síťové operace s exponenciálním backoff."""
+    """
+    Společná retry logika pro síťové operace s exponenciálním backoff.
+
+    DŮLEŽITÉ: Pro 404 Not Found chyby se NERETRYUJE - okamžitý fail.
+    Tím ušetříme ~24s při startu aplikace, když chybí vedlejší tabulky (aus_likp atd.).
+    """
     last_exc = None
     for attempt in range(max_retries):
         try:
             return operation(*args, **kwargs)
         except Exception as e:
+            # Rychlý fail pro 404 - neexistující soubory nebudou existovat ani za 3 pokusy
+            if _is_not_found_error(e):
+                logger.debug(f"Soubor neexistuje (404): {e}")
+                raise
             last_exc = e
             if attempt < max_retries - 1:
                 wait = RETRY_DELAY_S * (2 ** attempt)
@@ -233,6 +252,9 @@ def load_from_db(name: str) -> Optional[pd.DataFrame]:
     """
     Načte optimalizovaný Parquet ze Supabase Storage a vrátí DataFrame.
     Cachováno na 5 minut (TTL).
+
+    Optimalizace: Pro 404 (neexistující soubor) okamžitě vrací None.
+    Ušetří ~24s při startu, když chybí vedlejší tabulky (aus_likp atd.).
     """
     supabase = get_supabase_client()
     if supabase is None:
@@ -245,7 +267,16 @@ def load_from_db(name: str) -> Optional[pd.DataFrame]:
         def _download():
             return supabase.storage.from_(BUCKET_NAME).download(file_path)
 
-        response = _retry_operation(_download)
+        # Přímý download bez retry pro 404 - _retry_operation už má 404 fast-fail
+        try:
+            response = _retry_operation(_download)
+        except Exception as dl_err:
+            if _is_not_found_error(dl_err):
+                # Rychlý debug log, žádné varování - soubor prostě neexistuje
+                logger.debug(f"Soubor {name}.parquet neexistuje v Supabase (404)")
+                return None
+            raise
+
         df = _df_from_parquet(response)
 
         elapsed = time.time() - start_time
@@ -253,8 +284,8 @@ def load_from_db(name: str) -> Optional[pd.DataFrame]:
         return df
 
     except Exception as e:
-        # Soubor neexistuje - to je normální stav pro prázdnou DB
-        logger.debug(f"Soubor {name} neexistuje v Supabase (normální stav)")
+        # Jakákoliv jiná chyba
+        logger.warning(f"Chyba při načítání {name}: {type(e).__name__}: {e}")
         return None
 
 

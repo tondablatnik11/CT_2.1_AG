@@ -237,7 +237,7 @@ def render_audit(df_pick, df_vekp, df_vepo, df_oe, queue_count_col, billing_df, 
             c1, c2 = st.columns(2)
             c1.metric("Počet úkolů (TO)", to_count)
             c2.metric("Fyzických pohybů", int(moves_count))
-            with st.expander("Zobrazit Pick List"): st.dataframe(pick_del[[queue_count_col, 'Material', 'Qty', 'Pohyby_Rukou', 'Removal of total SU']], hide_index=True, use_container_width=True)
+            with st.expander("Zobrazit Pick List"): st.dataframe(pick_del[[queue_count_col, 'Material', 'Qty', 'Pohyby_Rukou', 'Removal of total SU']], hide_index=True, width="stretch")
 
             st.markdown("#### 2️⃣ Fáze: Systémové Obaly (VEKP / VEPO)")
             if df_vekp is not None and not df_vekp.empty:
@@ -344,7 +344,7 @@ def render_audit(df_pick, df_vekp, df_vepo, df_oe, queue_count_col, billing_df, 
                         except AttributeError:
                             styled_v = disp_v.style.applymap(color_status, subset=['Status pro fakturaci'])
                             
-                        st.dataframe(styled_v, hide_index=True, use_container_width=True)
+                        st.dataframe(styled_v, hide_index=True, width="stretch")
                 else: st.warning(f"Zakázka {sel_del} nebyla nalezena ve VEKP (zkontrolujte případné nuly v Exportu).")
             else: st.info("Chybí soubor VEKP pro druhou fázi.")
 
@@ -359,7 +359,7 @@ def render_audit(df_pick, df_vekp, df_vepo, df_oe, queue_count_col, billing_df, 
                     cc1.metric("Procesní čas", f"{ro.get('Process_Time_Min', 0):.1f} min")
                     cc2.metric("Pracovník / Směna", str(ro.get('Shift', '-')))
                     cc3.metric("Počet druhů zboží", str(ro.get('Number of item types', '-')))
-                    with st.expander("Zobrazit kompletní záznam balení"): st.dataframe(oe_del, hide_index=True, use_container_width=True)
+                    with st.expander("Zobrazit kompletní záznam balení"): st.dataframe(oe_del, hide_index=True, width="stretch")
                 else: st.info("K této zakázce nebyl v souboru OE-Times nalezen žádný záznam.")
 
     render_audit_interactive()

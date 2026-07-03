@@ -4,7 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 from modules.utils import t, safe_hu, safe_del
 from database import load_from_db
-from modules.safe_render import ErrorBoundary, validate_dataframe
+from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
 
 try:
     fast_render = st.fragment
@@ -422,7 +422,7 @@ def render_reliability_report(df_pick, df_vekp, df_vepo):
     with col2:
         if missing_data:
             with st.expander(f"⚠️ Zobrazit zakázky s chybějícími daty ({len(missing_data)} zakázek)", expanded=False):
-                st.dataframe(pd.DataFrame(missing_data), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(missing_data), hide_index=True, width="stretch")
         else:
             st.success("Perfektní! Všechny fakturované zakázky mají svá data kompletní.")
     st.divider()
@@ -536,7 +536,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 _t("Hrubá ztráta (TO navíc)", "Gross Loss (Extra TO)")
             ]
             
-            st.dataframe(disp.style.format({_t("Prům. pohybů na lokaci", "Avg Moves/Location"): "{:.1f}"}), use_container_width=True, hide_index=True)
+            st.dataframe(disp.style.format({_t("Prům. pohybů na lokaci", "Avg Moves/Location"): "{:.1f}"}), width="stretch", hide_index=True)
             
             st.markdown(f"<br>**🔍 {_t('Detailní seznam částí zakázek podle kategorie:', 'Detailed Order Parts List by Category:')}**", unsafe_allow_html=True)
             cat_opts = [_t("— Vyberte kategorii pro detail —", "— Select Category for Detail —")] + sorted(billing_df["Category_Full"].dropna().unique().tolist())
@@ -569,7 +569,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 except AttributeError:
                     styled_det = disp_det.style.format({_t("Prům. pohybů na lok.", "Avg Moves/Loc"): "{:.1f}"}).applymap(color_bilance_simple, subset=[_t("Čistá bilance (TO navíc)", "Net Balance (Extra TO)")])
                 
-                st.dataframe(styled_det, use_container_width=True, hide_index=True)
+                st.dataframe(styled_det, width="stretch", hide_index=True)
 
         with col_t2:
             st.markdown(f"**{_t('Trend v čase (Měsíce)', 'Trend over Time (Months)')}**")
@@ -637,7 +637,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                     margin=dict(l=0, r=0, t=30, b=0), 
                     legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0)
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             
             interactive_chart()
 
@@ -741,7 +741,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 _t("Zisk (ks HU)", "Profit (pcs HU)"): "+ {}"
             }).applymap(style_master_table, subset=[_t("Čistá bilance (HU - TO)", "Net Balance (HU - TO)")])
         
-        st.dataframe(styled_master, use_container_width=True, hide_index=True)
+        st.dataframe(styled_master, width="stretch", hide_index=True)
             
         st.markdown(f"<br>**{_t('Trend typů zakázek (Měsíce)', 'Trend of Order Types (Months)')}**", unsafe_allow_html=True)
         
@@ -838,7 +838,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 yaxis=dict(title=_t("Celkem částí zakázek", "Total Order Parts")),
                 yaxis2=dict(title=_t("Podíl zakázek (%)", "Order Share (%)"), side="right", overlaying="y", showgrid=False, range=[0, 110])
             )
-            st.plotly_chart(fig_r, use_container_width=True)
+            st.plotly_chart(fig_r, width="stretch")
         else: 
             st.info(_t("Zvolte alespoň jednu kategorii pro zobrazení grafu.", "Select at least one category to display the chart."))
 
@@ -857,7 +857,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 _t("Položky (Items)", "Items"), 
                 _t("Prodělek (Rozdíl)", "Loss (Difference)")
             ]
-            st.dataframe(imb_disp, use_container_width=True, hide_index=True)
+            st.dataframe(imb_disp, width="stretch", hide_index=True)
         else: 
             st.success(_t("Žádné zakázky s prodělkem nenalezeny!", "No loss-making orders found!"))
 

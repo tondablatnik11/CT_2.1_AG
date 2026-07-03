@@ -83,7 +83,7 @@ def _render_monthly_su_breakdown(fu_df, c_su, _t):
 
         col_su1, col_su2 = st.columns([1, 1.8])
         with col_su1:
-            st.dataframe(su_agg, use_container_width=True, hide_index=True)
+            st.dataframe(su_agg, width="stretch", hide_index=True)
 
         with col_su2:
             if 'Month' in fu_df.columns:
@@ -137,7 +137,7 @@ def _render_monthly_su_breakdown(fu_df, c_su, _t):
                     margin=dict(t=20, b=10, l=10, r=10),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
-                st.plotly_chart(fig_su, use_container_width=True)
+                st.plotly_chart(fig_su, width="stretch")
 
 
 def _render_vollpalette_analysis(df_pick, fu_df, c_su, queue_count_col, _t):
@@ -280,7 +280,7 @@ def _render_efficiency_view(df_view, queue_count_col, _t, is_pure=False, label="
                 margin=dict(t=20, b=10, l=10, r=10),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_bar, width="stretch")
             st.markdown("<br>", unsafe_allow_html=True)
 
     # === METRIKY ===
@@ -318,7 +318,7 @@ def _render_efficiency_view(df_view, queue_count_col, _t, is_pure=False, label="
             if c_su:
                 cols.append(c_su)
             disp1 = nepreb_df[[c for c in cols if c in nepreb_df.columns]].copy()
-            st.dataframe(disp1, use_container_width=True, hide_index=True)
+            st.dataframe(disp1, width="stretch", hide_index=True)
         else:
             st.info(_t("Žádné záznamy.", "No records found."))
 
@@ -330,7 +330,7 @@ def _render_efficiency_view(df_view, queue_count_col, _t, is_pure=False, label="
             if c_su:
                 cols.append(c_su)
             disp2 = disp2_raw[[c for c in cols if c in disp2_raw.columns]].copy()
-            st.dataframe(disp2, use_container_width=True, hide_index=True)
+            st.dataframe(disp2, width="stretch", hide_index=True)
         else:
             st.success(_t("Skvělá práce! Všechny celé palety prošly čistě.", "Great job! All full pallets were processed cleanly."))
 
@@ -366,7 +366,7 @@ def _render_xray_audit(fu_df, c_su, queue_count_col, _t):
         if c in pick_audit.columns:
             cols_to_show.append(c)
     avail_cols = [c for c in cols_to_show if c in pick_audit.columns]
-    st.dataframe(pick_audit[avail_cols], hide_index=True, use_container_width=True)
+    st.dataframe(pick_audit[avail_cols], hide_index=True, width="stretch")
 
     # Detailní audit po TO
     voll_set = st.session_state.get('voll_set', set())

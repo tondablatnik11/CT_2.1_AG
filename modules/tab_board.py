@@ -38,7 +38,7 @@ def render_board(df_pick, billing_df):
                           color_discrete_sequence=['#3b82f6'], template='plotly_white')
         fig_pick.update_traces(textposition='outside')
         fig_pick.update_layout(margin=dict(l=0, r=0, t=30, b=0), yaxis_title=None, xaxis_title=None)
-        st.plotly_chart(fig_pick, use_container_width=True)
+        st.plotly_chart(fig_pick, width="stretch")
 
     with c2:
         st.markdown("#### Počet vypickovaných Kusů v měsících")
@@ -51,7 +51,7 @@ def render_board(df_pick, billing_df):
                           color_discrete_sequence=['#10b981'], template='plotly_white')
         fig_qty.update_traces(textposition='outside')
         fig_qty.update_layout(margin=dict(l=0, r=0, t=30, b=0), yaxis_title=None, xaxis_title=None)
-        st.plotly_chart(fig_qty, use_container_width=True)
+        st.plotly_chart(fig_qty, width="stretch")
 
     st.divider()
 
@@ -104,6 +104,6 @@ def render_board(df_pick, billing_df):
                 title=None
             )
         )
-        st.plotly_chart(fig_bill, use_container_width=True)
+        st.plotly_chart(fig_bill, width="stretch")
     else:
         st.info("Pro zobrazení výkonu balírny navštivte nejprve záložku Fakturace.")

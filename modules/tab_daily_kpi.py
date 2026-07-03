@@ -169,7 +169,7 @@ def render_daily_kpi(df_pick, raw_vekp):
             st.markdown(f"**{_t('Rozpad podle front (Queue):', 'Breakdown by Queue:')}**")
             q_df = pick_daily.groupby('Category').size().reset_index(name='TO').sort_values('TO', ascending=False)
             q_df.columns = [_t('Fronta (Queue)', 'Queue'), _t('Počet TO', 'Number of TOs')]
-            st.dataframe(q_df, hide_index=True, use_container_width=True)
+            st.dataframe(q_df, hide_index=True, width="stretch")
 
     with kpi_c3:
         total_pack = pack_daily.shape[0] if not pack_daily.empty else 0
@@ -184,7 +184,7 @@ def render_daily_kpi(df_pick, raw_vekp):
             st.markdown(f"**{_t('Rozpad podle kategorií:', 'Breakdown by Category:')}**")
             c_df = pack_daily.groupby('Category').size().reset_index(name='HU').sort_values('HU', ascending=False)
             c_df.columns = [_t('Kategorie', 'Category'), _t('Počet HU', 'Number of HUs')]
-            st.dataframe(c_df, hide_index=True, use_container_width=True)
+            st.dataframe(c_df, hide_index=True, width="stretch")
 
     st.divider()
 
@@ -216,7 +216,7 @@ def render_daily_kpi(df_pick, raw_vekp):
             plot_bgcolor='rgba(0,0,0,0)',
             font=dict(size=12, family="Inter, sans-serif")
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     else:
         st.info(_t("Zatím žádná data pro hodinový graf v tento den.", "No data for hourly chart on this day yet."))
 
@@ -246,7 +246,7 @@ def render_daily_kpi(df_pick, raw_vekp):
         df_pbi = pd.DataFrame(pbi_rows)
         df_pbi = df_pbi[df_pbi['Hour'] >= 0]
         
-        st.dataframe(df_pbi.head(3), use_container_width=True)
+        st.dataframe(df_pbi.head(3), width="stretch")
         
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:

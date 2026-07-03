@@ -6,6 +6,7 @@ import plotly.express as px
 import re
 from database import load_from_db
 from modules.utils import t
+from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
 
 # Globální nastavení grafů pro jednotný vzhled
 CHART_LAYOUT = dict(
@@ -178,7 +179,7 @@ def render_packing(billing_df, df_oe):
                 
                 disp_cust = cust_df[['CUSTOMER', 'Orders', 'Avg_Min_Order', 'Avg_Min_HU', 'Total_Time']].copy()
                 disp_cust.columns = [_t("Zákazník", "Customer"), _t("Počet zakázek", "Orders"), _t("Prům. čas na zakázku", "Avg Time/Order"), _t("Prům. čas na 1 HU", "Avg Time/HU"), _t("Celkový čas (Min)", "Total Time (Min)")]
-                st.dataframe(disp_cust.style.format({_t("Celkový čas (Min)", "Total Time (Min)"): "{:.0f}", _t("Prům. čas na zakázku", "Avg Time/Order"): "{:.1f}", _t("Prům. čas na 1 HU", "Avg Time/HU"): "{:.1f}"}), hide_index=True, use_container_width=True)
+                st.dataframe(disp_cust.style.format({_t("Celkový čas (Min)", "Total Time (Min)"): "{:.0f}", _t("Prům. čas na zakázku", "Avg Time/Order"): "{:.1f}", _t("Prům. čas na 1 HU", "Avg Time/HU"): "{:.1f}"}), hide_index=True, width="stretch")
                 
                 fig_cust = go.Figure(go.Bar(
                     x=cust_df['Orders'].head(15), 
@@ -188,7 +189,7 @@ def render_packing(billing_df, df_oe):
                 ))
                 fig_cust.update_layout(**CHART_LAYOUT)
                 fig_cust.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title=_t("Počet zakázek", "Number of Orders"), title=_t("TOP 15 Zákazníků (dle počtu zakázek)", "TOP 15 Customers (by orders)"))
-                st.plotly_chart(fig_cust, use_container_width=True)
+                st.plotly_chart(fig_cust, width="stretch")
             else:
                 st.info(_t("Sloupec 'CUSTOMER' není v datech k dispozici.", "Column 'CUSTOMER' not available in data."))
 
@@ -206,7 +207,7 @@ def render_packing(billing_df, df_oe):
             
             disp_cat = cat_df[['Category_Full', 'Orders', 'Avg_Min_Order', 'Avg_Min_HU', 'Total_Time']].copy()
             disp_cat.columns = [_t("Kategorie", "Category"), _t("Počet zakázek", "Orders"), _t("Prům. čas na zakázku", "Avg Time/Order"), _t("Prům. čas na 1 HU", "Avg Time/HU"), _t("Celkový čas (Min)", "Total Time (Min)")]
-            st.dataframe(disp_cat.style.format({_t("Celkový čas (Min)", "Total Time (Min)"): "{:.0f}", _t("Prům. čas na zakázku", "Avg Time/Order"): "{:.1f}", _t("Prům. čas na 1 HU", "Avg Time/HU"): "{:.1f}"}), hide_index=True, use_container_width=True)
+            st.dataframe(disp_cat.style.format({_t("Celkový čas (Min)", "Total Time (Min)"): "{:.0f}", _t("Prům. čas na zakázku", "Avg Time/Order"): "{:.1f}", _t("Prům. čas na 1 HU", "Avg Time/HU"): "{:.1f}"}), hide_index=True, width="stretch")
 
             fig_cat = go.Figure(go.Bar(
                 x=cat_df['Orders'], 
@@ -216,7 +217,7 @@ def render_packing(billing_df, df_oe):
             ))
             fig_cat.update_layout(**CHART_LAYOUT)
             fig_cat.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title=_t("Počet zakázek", "Number of Orders"), title=_t("Kategorie (dle počtu zakázek)", "Categories (by orders)"))
-            st.plotly_chart(fig_cat, use_container_width=True)
+            st.plotly_chart(fig_cat, width="stretch")
 
     # ==========================================
     # ZÁLOŽKA 2: MATERIÁLY A SLOŽITOST
@@ -237,7 +238,7 @@ def render_packing(billing_df, df_oe):
             with col_m1:
                 disp_mat = mat_df.copy()
                 disp_mat.columns = [_t("Materiál", "Material"), _t("Frekvence (Zakázek)", "Frequency (Orders)"), _t("Prům. čas (Min)", "Avg Time (Min)"), _t("Celkový čas (Min)", "Total Time (Min)")]
-                st.dataframe(disp_mat.style.format({_t("Prům. čas (Min)", "Avg Time (Min)"): "{:.1f}", _t("Celkový čas (Min)", "Total Time (Min)"): "{:.0f}"}), hide_index=True, use_container_width=True)
+                st.dataframe(disp_mat.style.format({_t("Prům. čas (Min)", "Avg Time (Min)"): "{:.1f}", _t("Celkový čas (Min)", "Total Time (Min)"): "{:.0f}"}), hide_index=True, width="stretch")
             
             with col_m2:
                 fig_mat = go.Figure(go.Bar(
@@ -247,7 +248,7 @@ def render_packing(billing_df, df_oe):
                 ))
                 fig_mat.update_layout(**CHART_LAYOUT)
                 fig_mat.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title=_t("Průměrný čas balení materiálu", "Avg packing time of material"))
-                st.plotly_chart(fig_mat, use_container_width=True)
+                st.plotly_chart(fig_mat, width="stretch")
 
         st.divider()
         st.markdown(f"**🔴 {_t('Faktory zvyšující složitost balení (Skenování / KLT)', 'Factors increasing packing complexity (Scanning / KLT)')}**")
@@ -322,7 +323,7 @@ def render_packing(billing_df, df_oe):
                         _t("Prům. čas na zakázku (Min)", "Avg Time/Order (Min)"): "{:.1f}",
                         _t("Prům. čas na HU (Min)", "Avg Time/HU (Min)"): "{:.1f}",
                         _t("Prům. ks materiálu", "Avg Mat Pcs"): "{:.1f}"
-                    }), hide_index=True, use_container_width=True)
+                    }), hide_index=True, width="stretch")
                 with col_pg:
                     fig = go.Figure(go.Bar(
                         x=pkg_df['Pouzito_Zakazek'].head(10), 
@@ -332,7 +333,7 @@ def render_packing(billing_df, df_oe):
                     ))
                     fig.update_layout(**CHART_LAYOUT)
                     fig.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title=_t("Počet zakázek", "Number of Orders"), margin=dict(t=0, b=0, l=0, r=0), height=300)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
             else:
                 st.info(_t("Žádná data pro tento typ obalu.", "No data for this packaging type."))
 
@@ -381,7 +382,7 @@ def render_packing(billing_df, df_oe):
             _t("Čas balení (Min)", "Packing Time (Min)"): "{:.1f}", 
             _t("Minut na 1 HU", "Minutes per 1 HU"): "{:.1f}",
             _t("Kusů (Qty)", "Pieces (Qty)"): "{:.0f}"
-        }), hide_index=True, use_container_width=True)
+        }), hide_index=True, width="stretch")
 
     # ==========================================
     # ZÁLOŽKA 5: KOMPLEXNÍ VAZBY (Materiál -> Kusy -> Obaly)
@@ -413,7 +414,7 @@ def render_packing(billing_df, df_oe):
             )
             fig_bub.update_layout(**CHART_LAYOUT)
             fig_bub.update_layout(height=450)
-            st.plotly_chart(fig_bub, use_container_width=True)
+            st.plotly_chart(fig_bub, width="stretch")
 
             # --- TABULKA ---
             disp_mat_complex = mat_complex[[
@@ -438,7 +439,7 @@ def render_packing(billing_df, df_oe):
                 _t("Prům. čas (Min / Zak.)", "Avg Time (Min / Ord)"): "{:.1f}",
                 _t("Prům. čas (Min / HU)", "Avg Time (Min / HU)"): "{:.1f}",
                 _t("Prům. čas (Min / Ks)", "Avg Time (Min / Pc)"): "{:.2f}"
-            }), hide_index=True, use_container_width=True)
+            }), hide_index=True, width="stretch")
 
         else:
             st.info(_t("Pro vykreslení této matice chybí v datech sloupec 'Material'.", "Column 'Material' missing to render this matrix."))

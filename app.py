@@ -660,7 +660,7 @@ def main():
         st.markdown(f"<div class='main-header'>{t('title')}</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='sub-header'>{t('desc')}</div>", unsafe_allow_html=True)
     with col_lang:
-        if st.button(t('switch_lang'), use_container_width=True, key="lang_switch"):
+        if st.button(t('switch_lang'), width="stretch", key="lang_switch"):
             st.session_state.lang = 'en' if st.session_state.lang == 'cs' else 'cs'
             logger.info(f"Jazyk přepnut na: {st.session_state.lang}")
             st.rerun()
@@ -1208,7 +1208,7 @@ def _render_excel_export(df_pick: pd.DataFrame, data_dict: dict):
             file_name=f"Warehouse_Control_Tower_{time.strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
-            use_container_width=True
+            width="stretch"
         )
     except Exception as e:
         logger.exception("Chyba při generování Excel exportu")

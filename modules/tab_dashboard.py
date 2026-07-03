@@ -71,7 +71,7 @@ def _render_data_quality(df_pick, _t):
             miss_df.columns = [_t("Materiál", "Material"),
                                _t("Odhadované pohyby (Miss)", "Estimated Moves (Miss)"),
                                _t("Kusů", "Quantity")]
-            st.dataframe(miss_df, hide_index=True, use_container_width=True)
+            st.dataframe(miss_df, hide_index=True, width="stretch")
 
 
 def _render_queue_table(df_pick, queue_count_col, _t):
@@ -158,7 +158,7 @@ def _render_queue_table(df_pick, queue_count_col, _t):
         except Exception:
             styled_q = disp_q
 
-        st.dataframe(styled_q, hide_index=True, use_container_width=True)
+        st.dataframe(styled_q, hide_index=True, width="stretch")
         return disp_q
 
 
@@ -259,4 +259,4 @@ def _render_trend_chart(df_pick, queue_count_col, _t):
             yaxis2=dict(title=_t("Průměr pohybů na lokaci", "Avg Moves per Location"),
                         side="right", overlaying="y", showgrid=False),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")

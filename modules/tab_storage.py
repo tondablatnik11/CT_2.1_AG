@@ -137,13 +137,13 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
                 with c_p:
                     fig_p = px.pie(names=['Obsazeno', 'Volno'], values=[obs, vol], hole=0.75, color_discrete_sequence=['#f59e0b', '#10b981'])
                     fig_p.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10,b=10,l=10,r=10))
-                    st.plotly_chart(fig_p, use_container_width=True, key=f"pie_{sk_zone}")
+                    st.plotly_chart(fig_p, width="stretch", key=f"pie_{sk_zone}")
                 with c_b:
                     b_agg = df_zone.groupby([c_bintype_lx, 'Is_Empty']).size().reset_index(name='C')
                     b_agg['Stav'] = np.where(b_agg['Is_Empty'], 'Volno', 'Obsazeno')
                     fig_b = px.bar(b_agg, x=c_bintype_lx, y='C', color='Stav', barmode='stack', color_discrete_map={'Volno':'#10b981', 'Obsazeno':'#f59e0b'})
                     fig_b.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_title="", yaxis_title="Míst", margin=dict(t=10,b=10))
-                    st.plotly_chart(fig_b, use_container_width=True, key=f"bar_{sk_zone}")
+                    st.plotly_chart(fig_b, width="stretch", key=f"bar_{sk_zone}")
                 st.divider()
 
     with t2:
@@ -167,7 +167,7 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
                 yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.05)', autorange="reversed"), # reversed so front of warehouse is bottom
                 height=700, margin=dict(l=0, r=0, b=0, t=10)
             )
-            st.plotly_chart(fig_2d, use_container_width=True)
+            st.plotly_chart(fig_2d, width="stretch")
 
     with t3:
         st.markdown("#### 🔥 Teplotní Mapa Odběrů (Heatmapa z OE-Times / LTAK)")
@@ -188,7 +188,7 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
                 yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.05)', autorange="reversed"),
                 height=700, margin=dict(l=0, r=0, b=0, t=10)
             )
-            st.plotly_chart(fig_h, use_container_width=True)
+            st.plotly_chart(fig_h, width="stretch")
         else:
             st.info("Nahrajte pickovací export (LTAK/LTAP s detaily ZDROJ.MÍSTA) na nástěnce a mapa se automaticky rozsvítí.")
 
@@ -208,7 +208,7 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
                 st.success(f"Nalezeno {len(cands)} zbytečně blokovaných obřích pozic, kde zbývá pouze <= {limit_ks} ks! Vhodné přeskladnit do regálu.")
                 t_disp = cands[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt]].copy()
                 t_disp.columns = ['Zablokovaná pozice', 'Zablokovaný Typ', 'Materiál (SAP)', 'Počet ks k přehození']
-                st.dataframe(t_disp.sort_values('Počet ks k přehození'), hide_index=True, use_container_width=True)
+                st.dataframe(t_disp.sort_values('Počet ks k přehození'), hide_index=True, width="stretch")
             else: st.info(f"Nenalezeny žádné plýtvající boxy (0 výskytů s <= {limit_ks} ks).")
             
         st.divider()
@@ -224,5 +224,5 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
                 h_disp = ds[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt, 'D_Mov', 'Dni_bez']].sort_values('Dni_bez', ascending=False)
                 h_disp.columns = ['Lokace krypty', 'Typ', 'Materiál', 'Zásoba zamražena', 'Datum zkázy', 'Dní mrtvo']
                 st.warning(f"Kritický nález: {len(ds)} palet nevykázalo fyzický pohyb z regálu déle než {limit_days} dní.")
-                st.dataframe(h_disp, hide_index=True, use_container_width=True)
+                st.dataframe(h_disp, hide_index=True, width="stretch")
             else: st.success(f"Sklad se hejbe skvěle! Žádný materiál neleží déle jak {limit_days} dní ladem.")

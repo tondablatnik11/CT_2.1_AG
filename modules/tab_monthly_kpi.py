@@ -157,7 +157,7 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
             height=300,
             showlegend=False,
         )
-        st.plotly_chart(fig_target, use_container_width=True)
+        st.plotly_chart(fig_target, width="stretch")
 
     # === TRENDOVÝ GRAF ===
     st.divider()
@@ -201,7 +201,7 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
             title=None,
             height=450,
         )
-        st.plotly_chart(fig_trend, use_container_width=True)
+        st.plotly_chart(fig_trend, width="stretch")
 
     # === HEATMAPA ZÁTĚŽE (Queue vs Month) ===
     st.divider()
@@ -230,7 +230,7 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
                 plot_bgcolor='rgba(0,0,0,0)',
                 height=max(400, len(top_queues) * 28),
             )
-            st.plotly_chart(fig_heat, use_container_width=True)
+            st.plotly_chart(fig_heat, width="stretch")
 
     # === TOP MATERIÁLY V MĚSÍCI ===
     st.divider()
@@ -249,6 +249,6 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
 
             top_mat.columns = [_t("Materiál", "Material"), _t("Pohybů", "Moves"),
                                _t("Kusů", "Pcs"), _t("Počet TO", "TO Count")]
-            st.dataframe(top_mat, use_container_width=True, hide_index=True)
+            st.dataframe(top_mat, width="stretch", hide_index=True)
         else:
             st.info(_t("Žádná data v posledním měsíci.", "No data in latest month."))

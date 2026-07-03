@@ -156,10 +156,10 @@ def render_admins(df_vekp, df_likp):
                         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                         xaxis_title="Měsíc", yaxis_title="Spotřebováno (ks)"
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
                 
                 st.markdown("#### 📋 Historie použití (posledních 100 zabalených palet/krabic)")
                 if c_del_ana:
                     detail = df_sel[[c_del_ana, c_date_ana, c_hu_ana] if c_hu_ana else [c_del_ana, c_date_ana]].sort_values(by=c_date_ana, ascending=False).head(100)
                     detail.columns = ['Zakázka (Delivery)', 'Datum', 'Manipulační jednotka (HU)'] if c_hu_ana else ['Zakázka (Delivery)', 'Datum']
-                    st.dataframe(detail, hide_index=True, use_container_width=True)
+                    st.dataframe(detail, hide_index=True, width="stretch")

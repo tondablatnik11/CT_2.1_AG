@@ -165,7 +165,7 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
             margin=dict(l=0, r=0, t=10, b=0),
             hovermode="x unified"
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     st.divider()
 
@@ -201,40 +201,40 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("#### PI_PL_FU ")
-            st.dataframe(cat_a[cat_a['Queue_UPPER'] == 'PI_PL_FU'].drop(columns=cols_to_drop, errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(cat_a[cat_a['Queue_UPPER'] == 'PI_PL_FU'].drop(columns=cols_to_drop, errors='ignore'), width="stretch", hide_index=True)
         with col2:
             st.markdown("#### PI_PL_FUOE")
-            st.dataframe(cat_a[cat_a['Queue_UPPER'] == 'PI_PL_FUOE'].drop(columns=cols_to_drop, errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(cat_a[cat_a['Queue_UPPER'] == 'PI_PL_FUOE'].drop(columns=cols_to_drop, errors='ignore'), width="stretch", hide_index=True)
 
     with t2:
         st.markdown(_t("Skladník vytvořil u balení nové číslo palety (Dest HU se neshoduje se Source HU). Záložka 'Celé palety' by si myslela, že je to přebalené. **Fakturační mozek ale ve VEKP zjistil, že se obsah nezměnil a zachránil ji!**", "Worker relabeled the pallet. Basic tracking thinks it was unpacked, but the Billing engine confirmed unchanged content and saved it!"))
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("#### PI_PL_FU ")
-            st.dataframe(cat_b[cat_b['Queue_UPPER'] == 'PI_PL_FU'].drop(columns=cols_to_drop, errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(cat_b[cat_b['Queue_UPPER'] == 'PI_PL_FU'].drop(columns=cols_to_drop, errors='ignore'), width="stretch", hide_index=True)
         with col2:
             st.markdown("#### PI_PL_FUOE")
-            st.dataframe(cat_b[cat_b['Queue_UPPER'] == 'PI_PL_FUOE'].drop(columns=cols_to_drop, errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(cat_b[cat_b['Queue_UPPER'] == 'PI_PL_FUOE'].drop(columns=cols_to_drop, errors='ignore'), width="stretch", hide_index=True)
 
     with t3:
         st.markdown(_t("Skener hlásil **PI_PL_FU / PI_PL_FUOE**, ale v systému VEKP chybí jako Vollpalette. Důvody: Zakázka byla stornována, odjela v jiný den, nebo ji balírna fyzicky rozbalila a smíchala s něčím jiným.", "Scanner reported FU, but it is missing in VEKP as Vollpalette. Cancelled, moved to another day, or physically unpacked."))
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("#### PI_PL_FU ")
-            st.dataframe(cat_c[cat_c['Queue_UPPER'] == 'PI_PL_FU'].drop(columns=cols_to_drop, errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(cat_c[cat_c['Queue_UPPER'] == 'PI_PL_FU'].drop(columns=cols_to_drop, errors='ignore'), width="stretch", hide_index=True)
         with col2:
             st.markdown("#### PI_PL_FUOE ")
-            st.dataframe(cat_c[cat_c['Queue_UPPER'] == 'PI_PL_FUOE'].drop(columns=cols_to_drop, errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(cat_c[cat_c['Queue_UPPER'] == 'PI_PL_FUOE'].drop(columns=cols_to_drop, errors='ignore'), width="stretch", hide_index=True)
 
     with t4:
         st.markdown(_t("Tyto úkoly byly odeslány jako normální pickování, ale aplikace zjistila, že jste do balení (VEKP) už nic nepřidali a expedovalo se to jako jeden kus. **Zákazník to tudíž zaplatí jako Vollpaletu.**", "These tasks were normal picking, but the app detected it shipped as one piece. Customer will be billed for a Vollpalette."))
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("#### Běžné fronty (PI_PL, atd.)")
-            st.dataframe(cat_d[~cat_d['Queue_UPPER'].isin(['PI_PL_OE', 'PI_PA_OE'])].drop(columns=cols_to_drop, errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(cat_d[~cat_d['Queue_UPPER'].isin(['PI_PL_OE', 'PI_PA_OE'])].drop(columns=cols_to_drop, errors='ignore'), width="stretch", hide_index=True)
         with col2:
             st.markdown("#### Exportní fronty (PI_PL_OE, atd.)")
-            st.dataframe(cat_d[cat_d['Queue_UPPER'].isin(['PI_PL_OE', 'PI_PA_OE'])].drop(columns=cols_to_drop, errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(cat_d[cat_d['Queue_UPPER'].isin(['PI_PL_OE', 'PI_PA_OE'])].drop(columns=cols_to_drop, errors='ignore'), width="stretch", hide_index=True)
 
     # =========================================================
     # RENTGEN PALETOVÉ ZAKÁZKY (INTERAKTIVNÍ DETAIL)
@@ -272,7 +272,7 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
         except AttributeError:
             styled_del = disp_del.style.applymap(color_status, subset=['Výsledek (Status)'])
             
-        st.dataframe(styled_del, use_container_width=True, hide_index=True)
+        st.dataframe(styled_del, width="stretch", hide_index=True)
         
         df_hu_details = st.session_state.get('debug_hu_details')
         if df_hu_details is not None and not df_hu_details.empty:
@@ -281,7 +281,7 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
                 st.markdown(f"#### 💰 {_t('Co se u této zakázky skutečně vyfakturovalo (SAP VEKP)', 'What was actually billed for this order (SAP VEKP)')}")
                 disp_billed = del_billed[['HU_Ext', 'HU_Int', 'Category_Full', 'Is_Vollpalette', 'Materials']].copy()
                 disp_billed.columns = ['HU (SSCC)', 'HU (Interní)', 'Kategorie Fakturace', 'Je Vollpalette?', 'Materiály']
-                st.dataframe(disp_billed, use_container_width=True, hide_index=True)
+                st.dataframe(disp_billed, width="stretch", hide_index=True)
             else:
                 st.warning(_t("Tato zakázka nemá ve Fakturaci žádné vyfakturované jednotky (chybí data ve VEKP, nebo byla prázdná).", "This order has no billed units in Billing (missing VEKP data)."))
         else:

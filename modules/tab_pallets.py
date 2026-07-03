@@ -75,7 +75,7 @@ def render_pallets(df_pick):
         st.dataframe(disp_single.style.format({
             _t("Pohybů / lokaci", "Moves / Loc"): "{:.1f}", 
             _t("Celk. váha (kg)", "Total Weight (kg)"): "{:.1f}"
-        }), use_container_width=True, hide_index=True)
+        }), width="stretch", hide_index=True)
 
     # 6. GRAF (Trend vývoje čistých palet v čase)
     with col_g:
@@ -121,6 +121,6 @@ def render_pallets(df_pick):
                 legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0)
             )
             
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         else:
             st.info(_t("Chybí data o měsících pro vykreslení trendu.", "Missing month data to plot trend."))
