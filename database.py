@@ -61,9 +61,18 @@ def _is_not_found_error(exc: Exception) -> bool:
     """Detekuje 404 / not_found chyby ze Supabase (soubor neexistuje)."""
     exc_str = str(exc).lower()
     # Hledáme typické markery pro "soubor neexistuje"
+    # - case-insensitive (exc_str je již .lower())
+    # - pokrývá různé formáty (s/bez mezer, camelCase/snake_case)
     return any(marker in exc_str for marker in [
-        '"statuscode": 404', 'not found', 'object not found',
-        '"error": "not_found"', '"status_code": 404', '404 not found',
+        'statuscode": 404',      # camelCase JSON: "statusCode": 404
+        'status_code": 404',     # snake_case JSON: "status_code": 404
+        'statuscode: 404',       # bez uvozovek
+        'httpstatuscode": 404',  # HttpStatusCode formát
+        'not_found',             # Python dict nebo API: not_found
+        'not found',             # text
+        'object not found',      # Supabase storage spec.
+        '404 not found',         # HTTP reason phrase
+        '404',                   # samotné číslo (méně specifické, ale jako fallback)
     ])
 
 

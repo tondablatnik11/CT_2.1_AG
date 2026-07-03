@@ -84,8 +84,8 @@ def apply_chart_defaults(**overrides):
     yaxis3_override = extra_overrides.pop('yaxis3', None)
 
     # Merge defaultů s override
-    final_xaxis = {**CHART_XAXIS_DEFAULTS, **(xaxis_override or {})}
-    final_yaxis = {**CHART_YAXIS_DEFAULTS, **(yaxis_override or {})}
+    final_xaxis = {**CHART_XAXIS_DEFAULTS, **(xaxis_override or {})} if xaxis_override is not None else {}
+    final_yaxis = {**CHART_YAXIS_DEFAULTS, **(yaxis_override or {})} if yaxis_override is not None else {}
 
     layout['xaxis'] = final_xaxis
     layout['yaxis'] = final_yaxis
@@ -211,8 +211,11 @@ def get_match_key_vectorized(series: pd.Series) -> pd.Series:
 def get_match_key(val: Any) -> str:
     """Skalární verze normalizace pro jednu hodnotu."""
     v = str(val).strip().upper()
+    # 1. Pokud obsahuje '.' a je to číslo, odstranit koncové nuly a případnou '.'
     if '.' in v and v.replace('.', '').isdigit():
         v = v.rstrip('0').rstrip('.')
+    # 2. Znovu zkontrolovat, jestli je to číslo (po odstranění .0)
+    # a odstranit levé nuly (pro případ "001.50" -> po 1. kroku "001.5" -> "1.5")
     if v.isdigit():
         v = v.lstrip('0') or '0'
     return v
@@ -235,11 +238,13 @@ def parse_packing_time(val: Any) -> float:
     parts = v.split(':')
     try:
         if len(parts) == 3:
+            # Formát HH:MM:SS - hodiny, minuty, sekundy
             h, m, s = parts
             return int(h) * 60 + int(m) + float(s) / 60.0
         elif len(parts) == 2:
+            # Formát HH:MM - hodiny, minuty (parts[1] jsou minuty, ne zlomek hodiny!)
             h, m = parts
-            return int(h) + float(m) / 60.0
+            return int(h) * 60 + int(m)
     except (ValueError, IndexError):
         pass
     return 0.0

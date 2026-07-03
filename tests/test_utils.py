@@ -289,15 +289,17 @@ class TestFastComputeMoves:
         assert miss[0] == 0
 
     def test_box_decomposition_with_remainder(self):
-        """105 ks, krabice po 10 = 10 pohybů + 5 ks do hrsti."""
+        """105 ks, krabice po 10, lehké kusy h_limit=1 = 10+5=15 pohybů."""
         total, exact, miss = fast_compute_moves(
             qty_arr=[105], queue_arr=["PI_PL"], su_arr=[""],
             boxes_arr=[(10,)], weight_arr=[0.5], dim_arr=[5.0],  # lehké, malé
             v_limit=2.0, d_limit=15.0, h_limit=1,
         )
-        # 10 krabic + 5 ks (lehké, malé) -> 10 pohybů (vše do exact)
-        assert total[0] == 10
-        assert exact[0] == 10
+        # 10 krabic + 5 lehkých ks (h_limit=1, takže každý zvlášť = 5 pohybů)
+        # = celkem 15 pohybů
+        assert total[0] == 15
+        assert exact[0] == 15
+        assert miss[0] == 0
 
     def test_heavy_loose_piece(self):
         """Zbytek těžkých kusů = každý 1 pohyb."""
