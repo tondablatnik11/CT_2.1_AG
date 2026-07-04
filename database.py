@@ -28,25 +28,39 @@ UPLOAD_TIMEOUT_S = 120
 DOWNLOAD_TIMEOUT_S = 60
 
 
+def _get_secret(key: str) -> Optional[str]:
+    """Získá secret ze st.secrets nebo z os.environ (pro Railway/headless deploy)."""
+    # 1. Priorita: Streamlit secrets (lokální vývoj a Streamlit Cloud)
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass  # mimo Streamlit kontext (např. background workers)
+    # 2. Fallback: environment variable (Railway, Docker, CI/CD)
+    return os.environ.get(key)
+
+
 def _init_supabase() -> Optional[Client]:
     """Bezpečná inicializace Supabase klienta s detailním error loggingem."""
     try:
-        if "SUPABASE_URL" not in st.secrets or "SUPABASE_KEY" not in st.secrets:
-            logger.error("Supabase secrets nejsou k dispozici v st.secrets")
-            st.error("🔐 Chyba: V Streamlit Secrets chybí SUPABASE_URL nebo SUPABASE_KEY.")
+        url = _get_secret("SUPABASE_URL")
+        key = _get_secret("SUPABASE_KEY")
+        if not url or not key:
+            logger.error("Supabase credentials nejsou k dispozici (ani v st.secrets, ani v env vars)")
+            try:
+                st.error("🔐 Chyba: Chybí SUPABASE_URL nebo SUPABASE_KEY (nastavte v Secrets nebo v Railway env vars).")
+            except Exception:
+                pass
             return None
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
         client = create_client(url, key)
         logger.info("Supabase client inicializován úspěšně")
         return client
-    except KeyError as e:
-        logger.error(f"Chybějící secret: {e}")
-        st.error(f"🔐 Chyba konfigurace: chybí secret {e}")
-        return None
     except Exception as e:
         logger.exception("Nepodařilo se inicializovat Supabase klienta")
-        st.error(f"🔐 Chyba připojení k databázi: {e}")
+        try:
+            st.error(f"🔐 Chyba připojení k databázi: {e}")
+        except Exception:
+            pass
         return None
 
 
