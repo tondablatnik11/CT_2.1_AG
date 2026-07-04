@@ -184,16 +184,14 @@ def _render_trend_chart(df_pick, queue_count_col, _t):
         ).reset_index()
 
         # Split single/mix pro grafy (vektorově)
-        def _split_q(row):
-            q = str(row['Queue_Split']).strip()
-            # Nemáme zde pocet_mat, takže jen podle názvu fronty - jednodušší verze
-            return q
-        to_group['Queue_Split_Graf'] = to_group.apply(_split_q, axis=1)
+        to_group['Queue_Split_Graf'] = to_group['Queue_Split'].astype(str).str.strip()
 
         q_split_map = to_group.set_index(queue_count_col)['Queue_Split_Graf'].to_dict()
-        df_pick['Queue_Split_Graf'] = df_pick[queue_count_col].map(q_split_map).fillna(df_pick['Queue'])
+        # Pracujeme na kopii — df_pick může být sdílený cache objekt, nesmíme ho mutovat
+        df_trend = df_pick.copy()
+        df_trend['Queue_Split_Graf'] = df_trend[queue_count_col].map(q_split_map).fillna(df_trend['Queue'])
 
-        valid_queues = sorted([q for q in df_pick['Queue_Split_Graf'].dropna().unique() if q != 'N/A'])
+        valid_queues = sorted([q for q in df_trend['Queue_Split_Graf'].dropna().unique() if q != 'N/A'])
 
         if not valid_queues:
             st.info(_t("Žádné validní fronty pro zobrazení grafu.", "No valid queues to display."))
@@ -210,7 +208,7 @@ def _render_trend_chart(df_pick, queue_count_col, _t):
             st.info(_t("Prosím vyberte alespoň jednu Queue.", "Please select at least one Queue."))
             return
 
-        trend_df = df_pick[df_pick['Queue_Split_Graf'].isin(selected_queues)]
+        trend_df = df_trend[df_trend['Queue_Split_Graf'].isin(selected_queues)]
 
         # Agregace za (Month, TO)
         trend_to_group = trend_df.groupby(['Month', queue_count_col], observed=True).agg(

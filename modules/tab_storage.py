@@ -217,12 +217,26 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             limit_days = st.slider("Minimální expozice izolace (Počet dní bez pohybu vzhledem k dnešku):", 30, 365, 90, 10)
             ld = lt_clean.copy()
             ld['D_Mov'] = pd.to_datetime(ld[c_date_lt], errors='coerce', dayfirst=True)
-            cut = pd.Timestamp.now().normalize() - pd.Timedelta(days=limit_days)
-            ds = ld[ld['D_Mov'] < cut].copy()
+            now = pd.Timestamp.now().normalize()
+            cut = now - pd.Timedelta(days=limit_days)
+            # NaT = žádný záznam o pohybu → nejsilnější kandidát na ležáka.
+            # Původní `D_Mov < cut` tyto řádky tiše zahazoval (NaT porovnání = False).
+            ds = ld[(ld['D_Mov'].isna()) | (ld['D_Mov'] < cut)].copy()
             if not ds.empty:
-                ds['Dni_bez'] = (pd.Timestamp.now().normalize() - ds['D_Mov']).dt.days
-                h_disp = ds[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt, 'D_Mov', 'Dni_bez']].sort_values('Dni_bez', ascending=False)
+                days = (now - ds['D_Mov']).dt.days
+                # Řádky bez data: neznámé stáří, ale prokazatelně bez pohybu → nahoru
+                ds['Dni_bez'] = days.fillna(-1).astype(int)
+                ds['D_Mov_Disp'] = ds['D_Mov'].dt.strftime('%d.%m.%Y').fillna('— bez záznamu —')
+                ds['Dni_bez_Disp'] = ds['Dni_bez'].apply(
+                    lambda d: '∞ (bez data)' if d < 0 else str(d)
+                )
+                # Řazení: nejdřív bez data (∞), pak sestupně dle stáří
+                ds = ds.sort_values(['Dni_bez'], ascending=False)
+                ds_no_date = ds[ds['Dni_bez'] < 0]
+                ds_dated = ds[ds['Dni_bez'] >= 0].sort_values('Dni_bez', ascending=False)
+                ds = pd.concat([ds_no_date, ds_dated])
+                h_disp = ds[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt, 'D_Mov_Disp', 'Dni_bez_Disp']]
                 h_disp.columns = ['Lokace krypty', 'Typ', 'Materiál', 'Zásoba zamražena', 'Datum zkázy', 'Dní mrtvo']
-                st.warning(f"Kritický nález: {len(ds)} palet nevykázalo fyzický pohyb z regálu déle než {limit_days} dní.")
+                st.warning(f"Kritický nález: {len(ds)} palet nevykázalo fyzický pohyb z regálu déle než {limit_days} dní (včetně palet zcela bez záznamu pohybu).")
                 st.dataframe(h_disp, hide_index=True, width="stretch")
             else: st.success(f"Sklad se hejbe skvěle! Žádný materiál neleží déle jak {limit_days} dní ladem.")

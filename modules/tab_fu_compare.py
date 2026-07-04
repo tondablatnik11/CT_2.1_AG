@@ -9,6 +9,19 @@ try:
 except AttributeError:
     fast_render = lambda f: f
 
+
+def _voll_billed_vectorized(df, voll_set):
+    """Vektorová náhrada za .apply(check_voll, axis=1): True pokud
+    (Clean_Del, Dest_HU) NEBO (Clean_Del, Source_HU) je ve voll_set."""
+    dels = df['Clean_Del'].to_numpy()
+    dest = df['Dest_HU'].to_numpy()
+    src = df['Source_HU'].to_numpy()
+    return pd.Series(
+        [((d, dh) in voll_set) or ((d, sh) in voll_set)
+         for d, dh, sh in zip(dels, dest, src)],
+        index=df.index
+    )
+
 @safe_render(fallback_message="⚠️ Chyba při vykreslování Porovnání FU vs SAP")
 def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
     def _t(cs, en): return en if st.session_state.get('lang', 'cs') == 'en' else cs
@@ -37,11 +50,7 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
     df_p['Is_FU_Any'] = df_p['Is_FU'] | df_p['Is_FUOE']
     df_p['Is_Untouched'] = (df_p['Source_HU'] == df_p['Dest_HU']) & (df_p['Source_HU'] != '')
 
-    def check_voll(row):
-        d = row['Clean_Del']
-        return (d, row['Dest_HU']) in voll_set or (d, row['Source_HU']) in voll_set
-
-    df_p['Is_Voll_Billed'] = df_p.apply(check_voll, axis=1)
+    df_p['Is_Voll_Billed'] = _voll_billed_vectorized(df_p, voll_set)
 
     to_agg = df_p.groupby(queue_count_col).agg(
         Delivery=('Clean_Del', 'first'),
@@ -103,7 +112,7 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
     df_full['Is_FUOE'] = (df_full['Queue_UPPER'] == 'PI_PL_FUOE') & (~df_full['Is_KLT'])
     df_full['Is_FU_Any'] = df_full['Is_FU'] | df_full['Is_FUOE']
     df_full['Is_Untouched'] = (df_full['Source_HU'] == df_full['Dest_HU']) & (df_full['Source_HU'] != '')
-    df_full['Is_Voll_Billed'] = df_full.apply(check_voll, axis=1)
+    df_full['Is_Voll_Billed'] = _voll_billed_vectorized(df_full, voll_set)
 
     to_agg_full = df_full.groupby(queue_count_col).agg(
         Delivery=('Clean_Del', 'first'),

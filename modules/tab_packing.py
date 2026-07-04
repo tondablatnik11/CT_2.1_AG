@@ -92,12 +92,15 @@ def prep_packing_data(billing_df, df_oe):
                     if cleaned: all_pkgs.append(cleaned)
             if not all_pkgs: return "-"
             return pd.Series(all_pkgs).mode()[0]
-            
+
+        # Coerce jednou před groupby → vestavěný 'sum' místo lambda per skupinu
+        valid_time_df[pcs_col] = pd.to_numeric(valid_time_df[pcs_col], errors='coerce').fillna(0)
+
         mat_complex = valid_time_df.groupby(mat_col).agg(
             Orders=('Clean_Del', 'nunique'),
             Total_Time=('Process_Time_Min', 'sum'),
             Total_HU=('pocet_hu', 'sum'),
-            Total_Pcs=(pcs_col, lambda x: pd.to_numeric(x, errors='coerce').sum()),
+            Total_Pcs=(pcs_col, 'sum'),
             Top_Carton=('Cartons', get_top_pkg) if 'Cartons' in valid_time_df.columns else ('Clean_Del', lambda x: "-"),
             Top_KLT=('KLT', get_top_pkg) if 'KLT' in valid_time_df.columns else ('Clean_Del', lambda x: "-"),
             Top_Pallet=('Palety', get_top_pkg) if 'Palety' in valid_time_df.columns else ('Clean_Del', lambda x: "-")

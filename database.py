@@ -86,7 +86,6 @@ def _is_not_found_error(exc: Exception) -> bool:
         'not found',             # text
         'object not found',      # Supabase storage spec.
         '404 not found',         # HTTP reason phrase
-        '404',                   # samotné číslo (méně specifické, ale jako fallback)
     ])
 
 
@@ -183,6 +182,9 @@ def save_to_db(df: pd.DataFrame, name: str, append: bool = False) -> bool:
         if append:
             old_df = load_from_db(name)
             if old_df is not None and not old_df.empty:
+                # load_from_db je @st.cache_data → vrací SDÍLENÝ objekt.
+                # Musíme kopírovat, jinak mutace níže poškodí cache pro ostatní taby.
+                old_df = old_df.copy()
                 # Zarovnání sloupců - přidáme chybějící sloupce z nového DF
                 for col in df.columns:
                     if col not in old_df.columns:
@@ -211,6 +213,15 @@ def save_to_db(df: pd.DataFrame, name: str, append: bool = False) -> bool:
             )
 
         _retry_operation(_upload)
+
+        # Po append uploadu invalidujeme cache load_from_db, aby další čtení
+        # (i další iterace dávkového uploadu téže tabulky) vidělo čerstvá data
+        # místo stale cache → jinak by se append prováděl proti zastaralému stavu.
+        if append:
+            try:
+                load_from_db.clear()
+            except Exception:
+                pass
 
         elapsed = time.time() - start_time
         rows = len(df)

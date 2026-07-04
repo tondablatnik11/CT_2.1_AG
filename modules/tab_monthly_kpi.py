@@ -21,6 +21,47 @@ except AttributeError:
     fast_render = lambda f: f
 
 
+@st.cache_data(show_spinner=False, ttl=300)
+def _compute_monthly_agg(df_pick):
+    """Cachovaná měsíční agregace — nezávislá na cílových number_inputech,
+    takže úprava cílů uvnitř fragmentu nepřepočítává groupby."""
+    to_col = 'Transfer Order Number' if 'Transfer Order Number' in df_pick.columns else 'Delivery'
+
+    monthly_agg = df_pick.groupby('Month', observed=True).agg(
+        total_to=(to_col, 'nunique'),
+        total_orders=('Delivery', 'nunique'),
+        total_qty=('Qty', 'sum'),
+        total_moves=('Pohyby_Rukou', 'sum') if 'Pohyby_Rukou' in df_pick.columns else ('Qty', 'count'),
+        total_exact=('Pohyby_Exact', 'sum') if 'Pohyby_Exact' in df_pick.columns else ('Qty', 'count'),
+        total_miss=('Pohyby_Loose_Miss', 'sum') if 'Pohyby_Loose_Miss' in df_pick.columns else ('Qty', 'count'),
+        total_materials=('Material', 'nunique'),
+        total_locations=('Source Storage Bin', 'nunique'),
+    ).reset_index().sort_values('Month')
+
+    monthly_agg['pct_exact'] = np.where(
+        monthly_agg['total_moves'] > 0,
+        monthly_agg['total_exact'] / monthly_agg['total_moves'] * 100, 0
+    )
+    monthly_agg['avg_qty_per_to'] = np.where(
+        monthly_agg['total_to'] > 0,
+        monthly_agg['total_qty'] / monthly_agg['total_to'], 0
+    )
+    monthly_agg['avg_moves_per_loc'] = np.where(
+        monthly_agg['total_locations'] > 0,
+        monthly_agg['total_moves'] / monthly_agg['total_locations'], 0
+    )
+    return monthly_agg
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _compute_queue_heatmap(df_pick):
+    """Cachovaný pivot Queue × Month (top 15 front dle zátěže)."""
+    heat_df = df_pick.groupby(['Month', 'Queue'], observed=True)['Pohyby_Rukou'].sum().reset_index()
+    heat_pivot = heat_df.pivot(index='Queue', columns='Month', values='Pohyby_Rukou').fillna(0)
+    top_queues = heat_pivot.sum(axis=1).nlargest(15).index
+    return heat_pivot.loc[top_queues]
+
+
 @fast_render
 def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
     """Hlavní renderer pro Měsíční KPI záložku."""
@@ -58,33 +99,11 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
             target_moves = st.number_input(_t("Cíl: Pohybů / měsíc", "Target: Moves / month"), min_value=0, value=50000, step=5000)
 
     # === MĚSÍČNÍ AGREGACE ===
+    # monthly_agg vždy definované — když agregace selže, zůstane prázdný df
+    # a downstream `if not monthly_agg.empty` guardy korektně přeskočí sekce.
+    monthly_agg = pd.DataFrame()
     with ErrorBoundary("Agregace měsíčních KPI"):
-        # Určení sloupce pro unikátní zakázky
-        to_col = 'Transfer Order Number' if 'Transfer Order Number' in df_pick.columns else 'Delivery'
-
-        monthly_agg = df_pick.groupby('Month', observed=True).agg(
-            total_to=(to_col, 'nunique'),
-            total_orders=('Delivery', 'nunique'),
-            total_qty=('Qty', 'sum'),
-            total_moves=('Pohyby_Rukou', 'sum') if 'Pohyby_Rukou' in df_pick.columns else ('Qty', 'count'),
-            total_exact=('Pohyby_Exact', 'sum') if 'Pohyby_Exact' in df_pick.columns else ('Qty', 'count'),
-            total_miss=('Pohyby_Loose_Miss', 'sum') if 'Pohyby_Loose_Miss' in df_pick.columns else ('Qty', 'count'),
-            total_materials=('Material', 'nunique'),
-            total_locations=('Source Storage Bin', 'nunique'),
-        ).reset_index().sort_values('Month')
-
-        monthly_agg['pct_exact'] = np.where(
-            monthly_agg['total_moves'] > 0,
-            monthly_agg['total_exact'] / monthly_agg['total_moves'] * 100, 0
-        )
-        monthly_agg['avg_qty_per_to'] = np.where(
-            monthly_agg['total_to'] > 0,
-            monthly_agg['total_qty'] / monthly_agg['total_to'], 0
-        )
-        monthly_agg['avg_moves_per_loc'] = np.where(
-            monthly_agg['total_locations'] > 0,
-            monthly_agg['total_moves'] / monthly_agg['total_locations'], 0
-        )
+        monthly_agg = _compute_monthly_agg(df_pick)
 
     # === HLAVNÍ METRIKY (poslední měsíc) ===
     if not monthly_agg.empty:
@@ -210,12 +229,8 @@ def render_monthly_kpi(df_pick, raw_vekp, raw_vepo):
 
     if 'Queue' in df_pick.columns and 'Pohyby_Rukou' in df_pick.columns:
         with ErrorBoundary("Heatmapa Queue x Month"):
-            heat_df = df_pick.groupby(['Month', 'Queue'], observed=True)['Pohyby_Rukou'].sum().reset_index()
-            heat_pivot = heat_df.pivot(index='Queue', columns='Month', values='Pohyby_Rukou').fillna(0)
-
-            # Top 15 queues podle celkové zátěže
-            top_queues = heat_pivot.sum(axis=1).nlargest(15).index
-            heat_pivot = heat_pivot.loc[top_queues]
+            heat_pivot = _compute_queue_heatmap(df_pick)
+            top_queues = heat_pivot.index
 
             fig_heat = px.imshow(
                 heat_pivot.values,

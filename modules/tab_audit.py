@@ -47,7 +47,17 @@ def render_audit(df_pick, df_vekp, df_vepo, df_oe, queue_count_col, billing_df, 
                 df_ctrl['Clean_Del'] = df_ctrl[c_del].apply(safe_del)
                 
                 def norm_cat(k, a):
-                    return f"{str(k).strip().upper()} {str(a).strip().capitalize()}"
+                    base = str(k).strip().upper()
+                    art = str(a).strip().capitalize()
+                    # Zrcadlí přejmenování z tab_billing.py: pro Vollpalette
+                    # se OE→O a E→N, jinak by audit hlásil falešné rozdíly
+                    # (kontrolní soubor musí mluvit stejným slovníkem jako aplikace).
+                    if art == "Vollpalette":
+                        if base == "OE":
+                            base = "O"
+                        elif base == "E":
+                            base = "N"
+                    return f"{base} {art}"
                     
                 df_ctrl['Category_Full'] = df_ctrl.apply(lambda r: norm_cat(r[c_kat], r[c_art]), axis=1)
                 

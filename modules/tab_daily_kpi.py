@@ -68,41 +68,40 @@ def _render_daily_kpi_inner(df_pick, raw_vekp):
     def _t(cs, en):
         return en if st.session_state.get('lang', 'cs') == 'en' else cs
 
-    def get_shift(time_val):
-        """Určí směnu podle přesných časů 5:45 - 13:45 a 13:45 - 21:45"""
+    def _parse_hm(time_val):
+        """Rozparsuje čas na (hodina, minuta). Zvládá '5:45', '05:45', '5:45:00',
+        '05:45:00' i kompaktní '054500'/'0545'. Vrací None při selhání."""
         if pd.isna(time_val):
-            return _t("Neznámá", "Unknown")
-        try:
-            t_str = str(time_val).strip()
-            if len(t_str) == 8:
-                h, m, s = map(int, t_str.split(':'))
-            elif len(t_str) == 6:
-                h, m, s = int(t_str[0:2]), int(t_str[2:4]), int(t_str[4:6])
-            else:
-                return _t("Neznámá", "Unknown")
-
-            total_minutes = h * 60 + m
-            if 345 <= total_minutes < 825:
-                return _t("Ranní (5:45 - 13:45)", "Morning (5:45 - 13:45)")
-            elif 825 <= total_minutes < 1305:
-                return _t("Odpolední (13:45 - 21:45)", "Afternoon (13:45 - 21:45)")
-            return _t("Noční / Mimo směnu", "Night / Off-shift")
-        except Exception:
-            return _t("Neznámá", "Unknown")
-
-    def get_hour(time_val):
-        """Vrátí hodinu pro graf"""
-        if pd.isna(time_val):
-            return -1
+            return None
         try:
             t_str = str(time_val).strip()
             if ':' in t_str:
-                return int(t_str.split(':')[0])
-            if len(t_str) >= 6:
-                return int(t_str[0:2])
-            return -1
+                parts = t_str.split(':')
+                return int(parts[0]), int(parts[1])
+            # kompaktní formát bez oddělovačů (HHMMSS nebo HHMM)
+            if t_str.isdigit() and len(t_str) >= 4:
+                return int(t_str[0:2]), int(t_str[2:4])
         except Exception:
-            return -1
+            return None
+        return None
+
+    def get_shift(time_val):
+        """Určí směnu podle přesných časů 5:45 - 13:45 a 13:45 - 21:45"""
+        hm = _parse_hm(time_val)
+        if hm is None:
+            return _t("Neznámá", "Unknown")
+        h, m = hm
+        total_minutes = h * 60 + m
+        if 345 <= total_minutes < 825:
+            return _t("Ranní (5:45 - 13:45)", "Morning (5:45 - 13:45)")
+        elif 825 <= total_minutes < 1305:
+            return _t("Odpolední (13:45 - 21:45)", "Afternoon (13:45 - 21:45)")
+        return _t("Noční / Mimo směnu", "Night / Off-shift")
+
+    def get_hour(time_val):
+        """Vrátí hodinu pro graf"""
+        hm = _parse_hm(time_val)
+        return hm[0] if hm is not None else -1
 
     st.markdown(
         f"<div class='section-header'>"

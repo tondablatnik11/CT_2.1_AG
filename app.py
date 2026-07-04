@@ -43,6 +43,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("warehouse.app")
 
+
+def _get_admin_password() -> str:
+    """Admin heslo ze st.secrets nebo env var ADMIN_PASSWORD.
+    Fallback na 'admin123' jen pokud není nakonfigurováno nic (zpětná kompatibilita)."""
+    try:
+        if hasattr(st, "secrets") and "ADMIN_PASSWORD" in st.secrets:
+            return str(st.secrets["ADMIN_PASSWORD"])
+    except Exception:
+        pass
+    return os.environ.get("ADMIN_PASSWORD", "admin123")
+
 # ==========================================
 # PAGE CONFIGURATION & GLOBAL STYLES
 # ==========================================
@@ -501,9 +512,11 @@ def fetch_and_prep_data(use_marm: bool = True):
             logger.warning(f"Chyba při zpracování MARM: {e}")
 
     # 9) Mapování na Pick data
-    df_pick['Box_Sizes_List'] = df_pick['Match_Key'].apply(
-        lambda m: manual_boxes.get(m, box_dict.get(m, ()))
-    )
+    # Sloučený slovník: manual_boxes přebíjí MARM (zachována původní sémantika).
+    # .map() je C-level (na rozdíl od .apply s dvojitým dict.get na každém řádku).
+    combined_boxes = {**box_dict, **manual_boxes}
+    mapped_boxes = df_pick['Match_Key'].map(combined_boxes)
+    df_pick['Box_Sizes_List'] = [b if isinstance(b, tuple) else () for b in mapped_boxes]
     df_pick['Piece_Weight_KG'] = df_pick['Match_Key'].map(weight_dict).fillna(0.0)
     df_pick['Piece_Max_Dim_CM'] = df_pick['Match_Key'].map(dim_dict).fillna(0.0)
 
@@ -700,7 +713,10 @@ def main():
             return
 
         progress_bar.progress(65, text="⚙️ Počítám fyzické pohyby skladníků...")
-        df_pick = data_dict['df_pick']
+        # .copy() — data_dict['df_pick'] pochází z @st.cache_data (sdílený objekt).
+        # _compute_movements_safe přidává sloupce in-place; bez kopie by mutace
+        # prosákla do cache a mezi taby/sessiony (viz performance rules).
+        df_pick = data_dict['df_pick'].copy()
 
         # === FILTROVÁNÍ PODLE STRÁNKY ===
         if selected_page in (_t("Sklad (Storage)", "Storage"), _t("Admins", "Admins")):
@@ -868,7 +884,7 @@ def _render_admin_zone():
     ))
     admin_pwd = st.text_input(_t("Heslo:", "Password:"), type="password", key="admin_pwd")
 
-    if admin_pwd == "admin123":
+    if admin_pwd and admin_pwd == _get_admin_password():
         append_data = st.checkbox(
             _t("Připojovat nová data k existujícím", "Append new data to existing"),
             value=True,
@@ -995,7 +1011,7 @@ def _render_empty_database_warning():
             <div style="font-size: 64px; margin-bottom: 16px;">🗄️</div>
             <h2 style="color: #94a3b8; margin-bottom: 8px;">Databáze je prázdná</h2>
             <p style="color: #64748b; font-size: 16px; max-width: 500px; margin: 0 auto;">
-                Otevřete v levém menu <strong>Admin Zónu</strong>, zadejte heslo <code>admin123</code>
+                Otevřete v levém menu <strong>Admin Zónu</strong>, zadejte administrátorské heslo
                 a nahrajte Pick Report a další SAP soubory.
             </p>
         </div>
