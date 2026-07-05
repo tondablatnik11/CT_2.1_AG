@@ -19,7 +19,7 @@ import re
 import io
 import time
 import logging
-from typing import Optional
+from typing import Optional, Tuple, Any, Dict
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -336,27 +336,23 @@ def _t(cs: str, en: str) -> str:
 # HLAVNÍ DATA PIPELINE - OPTIMALIZOVANÝ
 # ==========================================
 
-@st.cache_data(show_spinner=False, ttl=300)
-def fetch_and_prep_data(use_marm: bool = True):
-    """
-    Centrální pipeline pro načtení a přípravu dat.
-    Cachuje se na 5 minut - nemusí se volat znovu při každém rerun.
-    """
-    start_time = time.time()
-    logger.info(f"fetch_and_prep_data start (use_marm={use_marm})")
+# =====================================================================
+# Rozklad fetch_and_prep_data na menší cache funkce (Fix A: OOM).
+# Každá funkce drží v paměti jen svůj vlastní dataset → špička RAM klesne
+# z ~400 MB (8 datasetů najednou v jednom blobu) na ~150 MB (df_pick +
+# jedna skupina master dat). Zároveň to zrychlí cold start, protože
+# loady běží paralelněji a neblokují se navzájem.
+# =====================================================================
 
-    # 1) Načtení základního pick reportu (povinný)
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_pick_processed(use_marm: bool) -> Optional[pd.DataFrame]:
+    """Nejtežší část: načte raw_pick, provede čištění/kategorie a vrátí df_pick
+    s derived sloupci (Month, Clean_Del, Queue, Match_Key, Box_Sizes_List,
+    Piece_Weight_KG, Piece_Max_Dim_CM)."""
     df_pick_raw = load_from_db('raw_pick')
     if df_pick_raw is None or df_pick_raw.empty:
-        logger.warning("raw_pick je prázdný - databáze neinicializovaná")
         return None
 
-    # 2) Paralelní načítání vedlejších tabulek (sekvenčně, ale rychle - cached)
-    df_marm_raw = load_from_db('raw_marm') if use_marm else None
-    df_queue_raw = load_from_db('raw_queue')
-    df_manual_raw = load_from_db('raw_manual')
-
-    # 3) Příprava a čištění pick dat
     df_pick = df_pick_raw.copy()
     df_pick['Delivery'] = (
         df_pick['Delivery'].astype(str).str.strip()
@@ -367,8 +363,6 @@ def fetch_and_prep_data(use_marm: bool = True):
         .replace(to_replace=['nan', 'NaN', 'None', 'none', ''], value=np.nan)
     )
 
-    # DŮLEŽITÉ: Aplikuj dtype optimalizaci na klíčové sloupce PŘED dropna
-    # (category sloupce jsou 10x rychlejší v operacích než object)
     for col in ['Delivery', 'Material', 'User', 'Queue']:
         if col in df_pick.columns and df_pick[col].dtype == 'object':
             try:
@@ -377,19 +371,15 @@ def fetch_and_prep_data(use_marm: bool = True):
                 pass
 
     df_pick = df_pick.dropna(subset=['Delivery', 'Material']).copy()
-    initial_rows = len(df_pick)
+    initial_rows = len(df_pick)  # pro log (po dropna, před admin filtrem)
 
-    # 4) Filtrování admin účtů
     num_removed_admins = 0
     if 'User' in df_pick.columns:
-        admin_users = ['UIDJ5089', 'UIH25501']
-        # Při kategorii .isin() je mnohem rychlejší
-        mask_admins = df_pick['User'].astype(str).isin(admin_users)
+        mask_admins = df_pick['User'].astype(str).isin(['UIDJ5089', 'UIH25501'])
         num_removed_admins = int(mask_admins.sum())
         if num_removed_admins > 0:
             df_pick = df_pick[~mask_admins].copy()
 
-    # 5) Vektorová příprava klíčů a sloupců
     df_pick['Match_Key'] = get_match_key_vectorized(df_pick['Material'].astype(str))
     df_pick['Qty'] = pd.to_numeric(df_pick['Act.qty (dest)'], errors='coerce').fillna(0).astype('float32')
 
@@ -401,195 +391,233 @@ def fetch_and_prep_data(use_marm: bool = True):
         .fillna('').astype(str).str.strip().str.upper()
     )
 
-    # Datum - konverze na skutečné datetime64 pro rychlé porovnání
     date_src = df_pick.get('Confirmation date', df_pick.get('Confirmation Date'))
     df_pick['Date'] = pd.to_datetime(date_src, errors='coerce')
 
-    # 6) Mapování front (Queue)
-    queue_count_col = 'Delivery'
-    df_pick['Queue'] = 'N/A'
-    if df_queue_raw is not None and not df_queue_raw.empty:
-        if 'Transfer Order Number' in df_pick.columns and 'Transfer Order Number' in df_queue_raw.columns:
-            q_map = (
-                df_queue_raw.dropna(subset=['Transfer Order Number', 'Queue'])
+    # Uložení statistiky pro build_data_dict (mimo Streamlit cache).
+    _pick_stats['initial_rows'] = initial_rows
+    _pick_stats['num_removed_admins'] = num_removed_admins
+    return df_pick
+
+
+# Interní dict pro mezivýpočty mezi @st.cache_data funkcemi (Streamlit cache
+# nesmí vracet mutable sdílený stav, ale prostý dict v modulu je bezpečný).
+_pick_stats: Dict[str, int] = {'initial_rows': 0, 'num_removed_admins': 0}
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_queue_and_dates() -> Tuple[Optional[Dict[Any, str]], Optional[Dict[Any, Any]]]:
+    """Queue lookup (TO → Queue) + fallback date lookup. None pokud tabulka chybí."""
+    df_queue_raw = load_from_db('raw_queue')
+    if df_queue_raw is None or df_queue_raw.empty:
+        return None, None
+    q_map = (
+        df_queue_raw.dropna(subset=['Transfer Order Number', 'Queue'])
+        .drop_duplicates('Transfer Order Number')
+        .set_index('Transfer Order Number')['Queue'].to_dict()
+    ) if 'Transfer Order Number' in df_queue_raw.columns else None
+    d_map = None
+    for d_col in ['Confirmation Date', 'Creation Date']:
+        if d_col in df_queue_raw.columns:
+            d_map = (
+                df_queue_raw.dropna(subset=['Transfer Order Number', d_col])
                 .drop_duplicates('Transfer Order Number')
-                .set_index('Transfer Order Number')['Queue'].to_dict()
+                .set_index('Transfer Order Number')[d_col].to_dict()
             )
-            df_pick['Queue'] = df_pick['Transfer Order Number'].map(q_map).fillna('N/A')
-            queue_count_col = 'Transfer Order Number'
+            break
+    return q_map, d_map
 
-            # Přenos dat z queue tabulky (pokud chybí datum v pick)
-            for d_col in ['Confirmation Date', 'Creation Date']:
-                if d_col in df_queue_raw.columns:
-                    d_map = (
-                        df_queue_raw.dropna(subset=['Transfer Order Number', d_col])
-                        .drop_duplicates('Transfer Order Number')
-                        .set_index('Transfer Order Number')[d_col].to_dict()
-                    )
-                    to_dates = df_pick['Transfer Order Number'].map(d_map)
-                    df_pick['Date'] = df_pick['Date'].fillna(pd.to_datetime(to_dates, errors='coerce'))
-                    break
-        elif 'SD Document' in df_queue_raw.columns:
-            q_map = (
-                df_queue_raw.dropna(subset=['SD Document', 'Queue'])
-                .drop_duplicates('SD Document')
-                .set_index('SD Document')['Queue'].to_dict()
-            )
-            df_pick['Queue'] = df_pick['Delivery'].map(q_map).fillna('N/A')
 
-        # Filtr CLEARANCE front
-        if 'Queue' in df_pick.columns:
-            df_pick = df_pick[df_pick['Queue'].astype(str).str.upper() != 'CLEARANCE'].copy()
-
-    # 7) Manuální master data (krabice pro materiály)
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_manual_boxes() -> Dict[str, Tuple[int, ...]]:
+    """Manuální master data (krabice pro materiály) → dict[match_key] = tuple(box sizes)."""
+    df_manual_raw = load_from_db('raw_manual')
     manual_boxes: Dict[str, Tuple[int, ...]] = {}
-    if df_manual_raw is not None and not df_manual_raw.empty:
-        try:
-            c_mat, c_pkg = df_manual_raw.columns[0], df_manual_raw.columns[1]
-            # Vektorové parsování pro velké datasety
-            pkgs = df_manual_raw[c_pkg].astype(str).fillna('')
-            mat_keys = df_manual_raw[c_mat].astype(str).apply(get_match_key)
+    if df_manual_raw is None or df_manual_raw.empty:
+        return manual_boxes
+    try:
+        c_mat, c_pkg = df_manual_raw.columns[0], df_manual_raw.columns[1]
+        pkgs = df_manual_raw[c_pkg].astype(str).fillna('')
+        mat_keys = df_manual_raw[c_mat].astype(str).apply(get_match_key)
+        for mat_key, pkg in zip(mat_keys, pkgs):
+            if not mat_key or mat_key in ('NAN', 'NONE', '0'):
+                continue
+            nums = re.findall(
+                r'\bK-(\d+)ks?\b|(\d+)\s*ks\b|balen[íi]\s+po\s+(\d+)|krabice\s+(?:po\s+)?(\d+)|(?:role|pytl[íi]k|pytel)[^\d]*(\d+)',
+                pkg, flags=re.IGNORECASE
+            )
+            ext = tuple(sorted(set(int(g) for m in nums for g in m if g), reverse=True))
+            if not ext and re.search(r'po\s*kusech', pkg, re.IGNORECASE):
+                ext = (1,)
+            if ext:
+                manual_boxes[mat_key] = ext
+    except Exception as e:
+        logger.warning(f"Chyba při parsování manual boxes: {e}")
+    return manual_boxes
 
-            for mat_key, pkg in zip(mat_keys, pkgs):
-                if not mat_key or mat_key in ('NAN', 'NONE', '0'):
-                    continue
-                nums = re.findall(
-                    r'\bK-(\d+)ks?\b|(\d+)\s*ks\b|balen[íi]\s+po\s+(\d+)|krabice\s+(?:po\s+)?(\d+)|(?:role|pytl[íi]k|pytel)[^\d]*(\d+)',
-                    pkg, flags=re.IGNORECASE
-                )
-                ext = tuple(sorted(set(int(g) for m in nums for g in m if g), reverse=True))
-                if not ext and re.search(r'po\s*kusech', pkg, re.IGNORECASE):
-                    ext = (1,)
-                if ext:
-                    manual_boxes[mat_key] = ext
-        except Exception as e:
-            logger.warning(f"Chyba při parsování manual boxes: {e}")
 
-    # 8) MARM master data - vektorová příprava
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_marm_master() -> Tuple[Dict[str, Tuple[int, ...]], Dict[str, float], Dict[str, float]]:
+    """MARM master data: box_dict (dict→tuple), weight_dict (per material KG), dim_dict (max dim CM)."""
+    df_marm_raw = load_from_db('raw_marm')
     box_dict: Dict[str, Tuple[int, ...]] = {}
     weight_dict: Dict[str, float] = {}
     dim_dict: Dict[str, float] = {}
-    if df_marm_raw is not None and not df_marm_raw.empty:
-        try:
-            df_marm_raw = df_marm_raw.copy()
-            df_marm_raw['Match_Key'] = get_match_key_vectorized(df_marm_raw['Material'].astype(str))
+    if df_marm_raw is None or df_marm_raw.empty:
+        return box_dict, weight_dict, dim_dict
+    try:
+        df_marm_raw = df_marm_raw.copy()
+        df_marm_raw['Match_Key'] = get_match_key_vectorized(df_marm_raw['Material'].astype(str))
 
-            # Krabice
-            df_boxes = df_marm_raw[df_marm_raw['Alternative Unit of Measure'].isin(BOX_UNITS)].copy()
-            if not df_boxes.empty:
-                df_boxes['Numerator'] = pd.to_numeric(df_boxes['Numerator'], errors='coerce').fillna(0)
-                # groupby + sorted set je rychlejší než apply s lambda
-                box_dict = (
-                    df_boxes[df_boxes['Numerator'] > 1]
-                    .groupby('Match_Key')['Numerator']
-                    .apply(lambda g: tuple(sorted(g.astype(int).tolist(), reverse=True)))
-                    .to_dict()
-                )
+        df_boxes = df_marm_raw[df_marm_raw['Alternative Unit of Measure'].isin(BOX_UNITS)].copy()
+        if not df_boxes.empty:
+            df_boxes['Numerator'] = pd.to_numeric(df_boxes['Numerator'], errors='coerce').fillna(0)
+            box_dict = (
+                df_boxes[df_boxes['Numerator'] > 1]
+                .groupby('Match_Key')['Numerator']
+                .apply(lambda g: tuple(sorted(g.astype(int).tolist(), reverse=True)))
+                .to_dict()
+            )
 
-            # Kusy (ST, PCE, KS...)
-            df_st = df_marm_raw[df_marm_raw['Alternative Unit of Measure'].isin(['ST', 'PCE', 'KS', 'EA', 'PC'])].copy()
-            if not df_st.empty:
-                df_st['Gross Weight'] = pd.to_numeric(df_st['Gross Weight'], errors='coerce').fillna(0)
-                # Vektorová konverze G -> KG
-                is_gram = df_st['Unit of Weight'].astype(str).str.upper() == 'G'
-                df_st['Weight_KG'] = np.where(is_gram, df_st['Gross Weight'] / 1000.0, df_st['Gross Weight']).astype('float32')
-                weight_dict = df_st.groupby('Match_Key')['Weight_KG'].first().to_dict()
+        df_st = df_marm_raw[df_marm_raw['Alternative Unit of Measure'].isin(['ST', 'PCE', 'KS', 'EA', 'PC'])].copy()
+        if not df_st.empty:
+            df_st['Gross Weight'] = pd.to_numeric(df_st['Gross Weight'], errors='coerce').fillna(0)
+            is_gram = df_st['Unit of Weight'].astype(str).str.upper() == 'G'
+            df_st['Weight_KG'] = np.where(is_gram, df_st['Gross Weight'] / 1000.0, df_st['Gross Weight']).astype('float32')
+            weight_dict = df_st.groupby('Match_Key')['Weight_KG'].first().to_dict()
 
-                # Rozměry - vektorový výpočet
-                def _to_cm_vec(arr, units):
-                    v = pd.to_numeric(arr, errors='coerce').fillna(0).astype('float32')
-                    u = units.astype(str).str.upper().str.strip()
-                    return np.where(u == 'MM', v / 10.0, np.where(u == 'M', v * 100.0, v))
+            def _to_cm_vec(arr, units):
+                v = pd.to_numeric(arr, errors='coerce').fillna(0).astype('float32')
+                u = units.astype(str).str.upper().str.strip()
+                return np.where(u == 'MM', v / 10.0, np.where(u == 'M', v * 100.0, v))
 
-                for dim_col, short in [('Length', 'L'), ('Width', 'W'), ('Height', 'H')]:
-                    if dim_col in df_st.columns:
-                        unit_col = df_st.get('Unit of Dimension', pd.Series(['CM'] * len(df_st)))
-                        df_st[short] = _to_cm_vec(df_st[dim_col], unit_col)
-                    else:
-                        df_st[short] = 0.0
-                dim_dict = df_st.set_index('Match_Key')[['L', 'W', 'H']].max(axis=1).to_dict()
-        except Exception as e:
-            logger.warning(f"Chyba při zpracování MARM: {e}")
+            for dim_col, short in [('Length', 'L'), ('Width', 'W'), ('Height', 'H')]:
+                if dim_col in df_st.columns:
+                    unit_col = df_st.get('Unit of Dimension', pd.Series(['CM'] * len(df_st)))
+                    df_st[short] = _to_cm_vec(df_st[dim_col], unit_col)
+                else:
+                    df_st[short] = 0.0
+            dim_dict = df_st.set_index('Match_Key')[['L', 'W', 'H']].max(axis=1).to_dict()
+    except Exception as e:
+        logger.warning(f"Chyba při zpracování MARM: {e}")
+    return box_dict, weight_dict, dim_dict
 
-    # 9) Mapování na Pick data
-    # Sloučený slovník: manual_boxes přebíjí MARM (zachována původní sémantika).
-    # .map() je C-level (na rozdíl od .apply s dvojitým dict.get na každém řádku).
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_oe_processed() -> Optional[pd.DataFrame]:
+    """OE-Times zpracovaný (Delivery jako klíč, Process_Time_Min, sloupčné agregace)."""
+    df_oe = load_from_db('raw_oe')
+    if df_oe is None or df_oe.empty:
+        return None
+    try:
+        cols_up = [str(c).upper() for c in df_oe.columns]
+        rename_map = {}
+        has_dn = has_time = False
+        for orig, up in zip(df_oe.columns, cols_up):
+            if not has_dn and ('DN NUMBER' in up or 'DELIVERY' in up or 'DODAVKA' in up):
+                rename_map[orig] = 'DN NUMBER (SAP)'
+                has_dn = True
+            elif not has_time and ('PROCESS' in up or 'CAS' in up or 'ČAS' in up or 'TIME' in up):
+                rename_map[orig] = 'Process Time'
+                has_time = True
+        df_oe = df_oe.rename(columns=rename_map)
+        df_oe = df_oe.loc[:, ~df_oe.columns.duplicated()].copy()
+        if 'DN NUMBER (SAP)' not in df_oe.columns or 'Process Time' not in df_oe.columns:
+            return None
+        df_oe['Delivery'] = df_oe['DN NUMBER (SAP)'].astype(str).str.strip()
+        df_oe['Process_Time_Min'] = _vectorize_packing_times(df_oe['Process Time'])
+        agg_dict = {'Process_Time_Min': 'sum'}
+        for col in ['CUSTOMER', 'Material', 'Scanning serial numbers', 'Reprinting labels ',
+                    'Difficult KLTs', 'Shift', 'Number of item types']:
+            if col in df_oe.columns:
+                agg_dict[col] = 'first'
+        for col in ['KLT', 'Palety', 'Cartons']:
+            if col in df_oe.columns:
+                agg_dict[col] = lambda x, c=col: '; '.join(x.dropna().astype(str))
+        return df_oe.groupby('Delivery').agg(agg_dict).reset_index()
+    except Exception as e:
+        logger.warning(f"Chyba při zpracování OE-Times: {e}")
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_cats_processed() -> Optional[pd.DataFrame]:
+    """df_cats s normalizovaným Lieferung a Category_Full."""
+    df_cats = load_from_db('raw_cats')
+    if df_cats is None or df_cats.empty:
+        return None
+    try:
+        c_del_cats = next(
+            (c for c in df_cats.columns
+             if str(c).strip().lower() in ['lieferung', 'delivery', 'zakázka', 'dodávka']),
+            df_cats.columns[0]
+        )
+        df_cats['Lieferung'] = df_cats[c_del_cats].astype(str).str.strip()
+        if 'Kategorie' in df_cats.columns and 'Art' in df_cats.columns:
+            df_cats['Category_Full'] = (
+                df_cats['Kategorie'].astype(str).str.strip() + " " +
+                df_cats['Art'].astype(str).str.strip()
+            )
+        return df_cats.drop_duplicates('Lieferung')
+    except Exception as e:
+        logger.warning(f"Chyba při zpracování df_cats: {e}")
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_aus_data() -> Dict[str, pd.DataFrame]:
+    """Vedlejší SAP tabulky (aus_likp, aus_sdshp_am2, …). Většinou vrací prázdný dict
+    (storage vrací 400 — opraveno Fixem B v database.py)."""
+    aus_data: Dict[str, pd.DataFrame] = {}
+    for sheet in ["LIKP", "SDSHP_AM2", "T031", "VEKP", "VEPO", "LIPS", "T023"]:
+        aus_df = load_from_db(f'aus_{sheet.lower()}')
+        if aus_df is not None:
+            aus_data[sheet] = aus_df
+    return aus_data
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_pick_enriched(use_marm: bool) -> Optional[pd.DataFrame]:
+    """df_pick s Queue, datem, Vollpaletten a box mappingem — vše pohromadě,
+    ale drží se v paměti jen tohle (master data se vyhodí po dokončení)."""
+    df_pick = _load_pick_processed(use_marm)
+    if df_pick is None or df_pick.empty:
+        return None
+    initial_rows = len(df_pick)
+
+    q_map, d_map = _load_queue_and_dates()
+    queue_count_col = 'Delivery'
+    df_pick['Queue'] = 'N/A'
+    if q_map is not None and 'Transfer Order Number' in df_pick.columns:
+        df_pick['Queue'] = df_pick['Transfer Order Number'].map(q_map).fillna('N/A')
+        queue_count_col = 'Transfer Order Number'
+        if d_map is not None:
+            to_dates = df_pick['Transfer Order Number'].map(d_map)
+            df_pick['Date'] = df_pick['Date'].fillna(pd.to_datetime(to_dates, errors='coerce'))
+
+    # Filtr CLEARANCE front
+    if 'Queue' in df_pick.columns:
+        df_pick = df_pick[df_pick['Queue'].astype(str).str.upper() != 'CLEARANCE'].copy()
+
+    # Mapování na master data
+    manual_boxes = _load_manual_boxes() if use_marm else {}
+    if use_marm:
+        box_dict, weight_dict, dim_dict = _load_marm_master()
+    else:
+        box_dict, weight_dict, dim_dict = {}, {}, {}
     combined_boxes = {**box_dict, **manual_boxes}
     mapped_boxes = df_pick['Match_Key'].map(combined_boxes)
     df_pick['Box_Sizes_List'] = [b if isinstance(b, tuple) else () for b in mapped_boxes]
     df_pick['Piece_Weight_KG'] = df_pick['Match_Key'].map(weight_dict).fillna(0.0)
     df_pick['Piece_Max_Dim_CM'] = df_pick['Match_Key'].map(dim_dict).fillna(0.0)
 
-    # 10) Detekce Vollpalet
+    # Vollpaletten (držíme jen set, ne celý df)
     df_vekp_raw = load_from_db('raw_vekp')
     df_vepo_raw = load_from_db('raw_vepo')
     with ErrorBoundary("Detekce Vollpalet", level="warning"):
         voll_set = detect_vollpalettes(df_pick, df_vekp_raw, df_vepo_raw)
 
-    # 11) OE-Times (časy balení)
-    df_oe = load_from_db('raw_oe')
-    if df_oe is not None and not df_oe.empty:
-        try:
-            cols_up = [str(c).upper() for c in df_oe.columns]
-            rename_map = {}
-            has_dn = has_time = False
-            for orig, up in zip(df_oe.columns, cols_up):
-                if not has_dn and ('DN NUMBER' in up or 'DELIVERY' in up or 'DODAVKA' in up):
-                    rename_map[orig] = 'DN NUMBER (SAP)'
-                    has_dn = True
-                elif not has_time and ('PROCESS' in up or 'CAS' in up or 'ČAS' in up or 'TIME' in up):
-                    rename_map[orig] = 'Process Time'
-                    has_time = True
-            df_oe = df_oe.rename(columns=rename_map)
-            df_oe = df_oe.loc[:, ~df_oe.columns.duplicated()].copy()
-
-            if 'DN NUMBER (SAP)' in df_oe.columns and 'Process Time' in df_oe.columns:
-                df_oe['Delivery'] = df_oe['DN NUMBER (SAP)'].astype(str).str.strip()
-                # Vektorový parse_packing_time (10x rychlejší než apply)
-                df_oe['Process_Time_Min'] = _vectorize_packing_times(df_oe['Process Time'])
-
-                agg_dict = {'Process_Time_Min': 'sum'}
-                for col in ['CUSTOMER', 'Material', 'Scanning serial numbers', 'Reprinting labels ',
-                            'Difficult KLTs', 'Shift', 'Number of item types']:
-                    if col in df_oe.columns:
-                        agg_dict[col] = 'first'
-                for col in ['KLT', 'Palety', 'Cartons']:
-                    if col in df_oe.columns:
-                        agg_dict[col] = lambda x, c=col: '; '.join(x.dropna().astype(str))
-                df_oe = df_oe.groupby('Delivery').agg(agg_dict).reset_index()
-            else:
-                df_oe = None
-        except Exception as e:
-            logger.warning(f"Chyba při zpracování OE-Times: {e}")
-            df_oe = None
-
-    # 12) Kategorie zakázek (df_cats)
-    df_cats = load_from_db('raw_cats')
-    if df_cats is not None and not df_cats.empty:
-        try:
-            c_del_cats = next(
-                (c for c in df_cats.columns
-                 if str(c).strip().lower() in ['lieferung', 'delivery', 'zakázka', 'dodávka']),
-                df_cats.columns[0]
-            )
-            df_cats['Lieferung'] = df_cats[c_del_cats].astype(str).str.strip()
-            if 'Kategorie' in df_cats.columns and 'Art' in df_cats.columns:
-                df_cats['Category_Full'] = (
-                    df_cats['Kategorie'].astype(str).str.strip() + " " +
-                    df_cats['Art'].astype(str).str.strip()
-                )
-            df_cats = df_cats.drop_duplicates('Lieferung')
-        except Exception as e:
-            logger.warning(f"Chyba při zpracování df_cats: {e}")
-
-    # 13) Načtení vedlejších SAP tabulek
-    aus_data = {}
-    for sheet in ["LIKP", "SDSHP_AM2", "T031", "VEKP", "VEPO", "LIPS", "T023"]:
-        aus_df = load_from_db(f'aus_{sheet.lower()}')
-        if aus_df is not None:
-            aus_data[sheet] = aus_df
-
-    # Finální optimalizace dtype pro nejčastěji používané sloupce
+    # Finální optimalizace dtype
     for col in ['Queue', 'Storage Unit Type', 'Type', 'Removal of total SU']:
         if col in df_pick.columns and df_pick[col].dtype == 'object':
             try:
@@ -597,8 +625,7 @@ def fetch_and_prep_data(use_marm: bool = True):
             except (TypeError, ValueError):
                 pass
 
-    # === DŮLEŽITÉ: Přidání sloupců, které potřebují tab moduly ===
-    # Month - agregace období pro grafy a filtry
+    # Month
     if 'Date' in df_pick.columns and 'Month' not in df_pick.columns:
         try:
             df_pick['Month'] = df_pick['Date'].dt.to_period('M').astype(str).replace('NaT', 'Neznámé')
@@ -606,17 +633,59 @@ def fetch_and_prep_data(use_marm: bool = True):
             logger.warning(f"Nelze vytvořit Month sloupec: {e}")
             df_pick['Month'] = 'Neznámé'
 
-    # Clean_Del a _clean_del - normalizované Delivery klíče pro spojování s VEKP/VEPO
+    # Clean_Del
     if 'Clean_Del' not in df_pick.columns and 'Delivery' in df_pick.columns:
         try:
             df_pick['Clean_Del'] = df_pick['Delivery'].apply(safe_del)
         except Exception as e:
             logger.warning(f"Nelze vytvořit Clean_Del: {e}")
 
-    elapsed = time.time() - start_time
+    return df_pick
+
+
+def build_data_dict(use_marm: bool = True) -> Optional[Dict[str, Any]]:
+    """
+    Tenký orchestrátor, který slepí výsledky dílčích cache funkcí do tvaru,
+    jaký čeká zbytek aplikace (klíče: df_pick, queue_count_col, voll_set,
+    df_vekp, df_vepo, df_cats, df_oe, aus_data, manual_boxes, weight_dict,
+    dim_dict, box_dict, num_removed_admins).
+
+    DŮLEŽITÉ: Tato funkce sama o sobě není cacheovaná — pouze skládá.
+    Streamlit cachuje výsledky dílčích loaderů nezávisle, takže v RAM
+    najednou leží jen ~df_pick + jedna skupina master dat.
+    """
+    df_pick = _load_pick_enriched(use_marm)
+    if df_pick is None or df_pick.empty:
+        logger.warning("df_pick je prázdný - databáze neinicializovaná")
+        return None
+
+    # Zjistí queue_count_col z derived df_pick (Queue sloupec + Transfer Order Number)
+    queue_count_col = 'Delivery'
+    if 'Transfer Order Number' in df_pick.columns:
+        queue_count_col = 'Transfer Order Number'
+
+    # Vollpaletten set + raw vekp/vepo (musí se držet pro Billing/Admins/Audit)
+    df_vekp_raw = load_from_db('raw_vekp')
+    df_vepo_raw = load_from_db('raw_vepo')
+    with ErrorBoundary("Detekce Vollpalet", level="warning"):
+        voll_set = detect_vollpalettes(df_pick, df_vekp_raw, df_vepo_raw)
+
+    df_oe = _load_oe_processed()
+    df_cats = _load_cats_processed()
+    aus_data = _load_aus_data()
+
+    # Master data musíme vrátit i v dictu pro Audit/Billing — znovu z cache.
+    manual_boxes = _load_manual_boxes()
+    if use_marm:
+        box_dict, weight_dict, dim_dict = _load_marm_master()
+    else:
+        box_dict, weight_dict, dim_dict = {}, {}, {}
+
+    initial_rows = _pick_stats.get('initial_rows', len(df_pick))
+    num_removed_admins = _pick_stats.get('num_removed_admins', 0)
     logger.info(
-        f"fetch_and_prep_data hotovo: {len(df_pick):,} řádků (z {initial_rows:,} původních), "
-        f"{num_removed_admins} adminů odebráno, {elapsed:.2f}s"
+        f"build_data_dict hotovo: {len(df_pick):,} řádků (z {initial_rows:,} původních), "
+        f"{num_removed_admins} adminů odebráno"
     )
 
     return {
@@ -634,6 +703,13 @@ def fetch_and_prep_data(use_marm: bool = True):
         'dim_dict': dim_dict,
         'box_dict': box_dict,
     }
+
+
+def fetch_and_prep_data(use_marm: bool = True) -> Optional[Dict[str, Any]]:
+    """Back-compat obal — volá nový build_data_dict. Drží se v API kvůli
+    případným externím importům; samotná implementace je v build_data_dict.
+    Logika se nyní skládá z menších cache funkcí → špička RAM klesne."""
+    return build_data_dict(use_marm)
 
 
 def _vectorize_packing_times(series: pd.Series) -> pd.Series:

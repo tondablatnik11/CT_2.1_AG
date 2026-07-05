@@ -86,6 +86,12 @@ def _is_not_found_error(exc: Exception) -> bool:
         'not found',             # text
         'object not found',      # Supabase storage spec.
         '404 not found',         # HTTP reason phrase
+        # 4xx obecně: klient nemá právo / špatný požadavek — nikdy se neopraví retry,
+        # a opakované requesty zdržují pipeline při startu (~3 s na každou tabulku).
+        'statuscode": 400', 'status_code": 400', 'statuscode: 400',
+        'statuscode": 401', 'status_code": 401', 'statuscode: 401',
+        'statuscode": 403', 'status_code": 403', 'statuscode: 403',
+        '400 bad request', '401 unauthorized', '403 forbidden',
     ])
 
 

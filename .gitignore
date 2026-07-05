@@ -64,3 +64,6 @@ test_outputs/
 __pycache__/
 *.pyc
 .claude/
+
+# Lokální dočasné soubory konverzace (parsované JSONL výpisy)
+conv_out.txt
