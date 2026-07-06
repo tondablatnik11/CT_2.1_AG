@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -6,6 +8,8 @@ import streamlit as st
 from database import load_from_db
 from modules.safe_render import safe_render
 from modules.utils import safe_del, safe_hu
+
+logger = logging.getLogger("warehouse.tab_billing")
 
 try:
     fast_render = st.fragment
