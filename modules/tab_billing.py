@@ -460,17 +460,54 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
 
         voll_set = st.session_state.get('voll_set', set()) or set()
 
-        # Bezpečné volání hlavní logiky s fallbackem
+        # === SESSION_STATE MEMOIZACE ===
+        # Billing logika je velmi výpočetně nákladná (desítky sekund). Streamlit
+        # @st.cache_data na cached_billing_logic_v28 NEfunguje, protože předáváme
+        # mutable argumenty (DataFrames, set). Řešíme to přes hash vstupních dat.
+        # Pokud se vstupy nezměnily, vrátíme výsledek z cache.
         try:
-            billing_df, df_hu_details = cached_billing_logic_v28(
-                df_pick, df_vekp, df_vepo, df_cats, queue_count_col, voll_set
+            # Hash založený na počtu řádků + paměťové adrese DataFramů.
+            # Toto je lightweight detekce změny - pokud se data znovu načtou z
+            # Supabase, Python vytvoří nové objekty a ID se změní.
+            input_hash = (
+                id(df_pick), len(df_pick) if df_pick is not None else 0,
+                id(df_vekp), len(df_vekp) if df_vekp is not None else 0,
+                id(df_vepo), len(df_vepo) if df_vepo is not None else 0,
+                id(df_cats), len(df_cats) if df_cats is not None else 0,
+                queue_count_col,
+                len(voll_set),
+                hash(frozenset(voll_set)) if voll_set else 0,
             )
-        except Exception as e:
-            st.error(f"❌ Kritická chyba v Billing Logic: {e}")
-            import traceback
-            with st.expander("🔧 Detaily"):
-                st.code(traceback.format_exc(), language="python")
-            return pd.DataFrame()
+        except Exception:
+            input_hash = None
+
+        cached = st.session_state.get('_billing_cache')
+        if cached and input_hash is not None and cached.get('hash') == input_hash:
+            # Cache HIT - vrátíme výsledek bez výpočtu
+            logger.info("Billing cache HIT - přeskakuji výpočet")
+            billing_df = cached['billing_df']
+            df_hu_details = cached['hu_details']
+        else:
+            # Cache MISS - počítáme
+            logger.info("Billing cache MISS - spouštím výpočet (může trvat 10-30s)")
+            try:
+                billing_df, df_hu_details = cached_billing_logic_v28(
+                    df_pick, df_vekp, df_vepo, df_cats, queue_count_col, voll_set
+                )
+                # Uložíme výsledek do session_state cache
+                if input_hash is not None:
+                    st.session_state['_billing_cache'] = {
+                        'hash': input_hash,
+                        'billing_df': billing_df,
+                        'hu_details': df_hu_details,
+                    }
+                    logger.info("Billing výsledek uložen do session_state cache")
+            except Exception as e:
+                st.error(f"❌ Kritická chyba v Billing Logic: {e}")
+                import traceback
+                with st.expander("🔧 Detaily"):
+                    st.code(traceback.format_exc(), language="python")
+                return pd.DataFrame()
 
         # ===============================================
         # APLIKACE FILTRU MĚSÍCE (aby vše sedělo s menu)

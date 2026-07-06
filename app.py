@@ -1197,8 +1197,14 @@ def main():
             logger.debug(f"Varování o vysoké chybovosti selhalo: {warn_e}")
 
     finally:
-        # Překreslíme header bar s finálním stavem pipeline
-        _render_app_header_bar(status_override=st.session_state.pipeline_status)
+        # Překreslíme header bar s finálním stavem pipeline (pouze pokud ještě nebyl vykreslen).
+        # DŮLEŽITÉ: V Streamlit se widgety s klíčem "quick_refresh" NESMÍ renderovat 2x,
+        # protože to vyhodí StreamlitDuplicateElementKey. Pokud se _render_app_header_bar
+        # již zavolal na začátku main(), tady pouze aktualizujeme session state - samotné
+        # překreslení proběhne v dalším rerunu.
+        if st.session_state.get('pipeline_status') != st.session_state.get('_header_last_status'):
+            st.session_state['_header_last_status'] = st.session_state.pipeline_status
+            # Nekreslíme znovu - aktualizace statusu se projeví v dalším Streamlit rerunu.
 
 
 def _render_app_header_bar(status_override: Optional[str] = None):
