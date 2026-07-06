@@ -1,12 +1,13 @@
 """
 Full Pallets (FU) - Analýza efektivity celých palet.
 """
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
-from modules.utils import t, safe_del, safe_hu, is_box, CHART_COLORS
-from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
+import streamlit as st
+
+from modules.safe_render import ErrorBoundary, safe_render, validate_dataframe
+from modules.utils import is_box, safe_del, safe_hu, t
 
 
 @safe_render(fallback_message="⚠️ Chyba při vykreslování analýzy celých palet")

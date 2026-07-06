@@ -1,10 +1,11 @@
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
-from modules.utils import t, safe_hu, safe_del
+import streamlit as st
+
 from database import load_from_db
-from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
+from modules.safe_render import safe_render
+from modules.utils import safe_del, safe_hu
 
 try:
     fast_render = st.fragment
@@ -25,7 +26,7 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
     # ---------------------------------------------------------
     vekp_clean = df_vekp.copy()
     cols_lower = [str(c).lower().strip() for c in vekp_clean.columns]
-    
+
     hu_int_cols = [c for c, l in zip(vekp_clean.columns, cols_lower) if "internal" in l or "intern" in l or "handling unit" == l or "manipul" in l or "mj" in l]
     hu_ext_cols = [c for c, l in zip(vekp_clean.columns, cols_lower) if "external" in l or "extern" in l]
     del_cols = [c for c, l in zip(vekp_clean.columns, cols_lower) if "delivery" in l or "lieferung" in l or "dodávka" in l or "dodavka" in l or "zakázka" in l or "zakazka" in l]
@@ -34,10 +35,10 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
 
     if hu_int_cols: vekp_clean['Uni_HU_Int'] = vekp_clean[hu_int_cols].bfill(axis=1).iloc[:, 0]
     else: vekp_clean['Uni_HU_Int'] = vekp_clean.iloc[:, 0]
-    
+
     if del_cols: vekp_clean['Uni_Del'] = vekp_clean[del_cols].bfill(axis=1).iloc[:, 0]
     else: vekp_clean['Uni_Del'] = np.nan
-    
+
     vekp_clean = vekp_clean.dropna(subset=["Uni_HU_Int", "Uni_Del"])
     vekp_clean['Clean_Del'] = vekp_clean['Uni_Del'].apply(safe_del)
     vekp_filtered = vekp_clean[vekp_clean['Clean_Del'] != ''].copy() 
@@ -50,13 +51,13 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
     vekp_filtered['Clean_HU_Int'] = vekp_filtered['Uni_HU_Int'].apply(safe_hu)
     vekp_filtered['Clean_HU_Ext'] = vekp_filtered['Uni_HU_Ext'].apply(safe_hu)
     vekp_filtered['Clean_Parent'] = vekp_filtered['Uni_Parent'].apply(safe_hu)
-    
+
     if date_cols:
         vekp_filtered['VEKP_Date'] = pd.to_datetime(vekp_filtered[date_cols].bfill(axis=1).iloc[:, 0], errors='coerce')
         vekp_filtered['VEKP_Month'] = vekp_filtered['VEKP_Date'].dt.to_period('M').astype(str).replace('NaT', 'Neznámé')
     else:
         vekp_filtered['VEKP_Month'] = 'Neznámé'
-        
+
     del_vekp_month = vekp_filtered.groupby('Clean_Del')['VEKP_Month'].first().to_dict()
     int_to_ext = dict(zip(vekp_filtered['Clean_HU_Int'], vekp_filtered['Clean_HU_Ext']))
 
@@ -69,10 +70,10 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
         df_pick_billing = df_pick.copy()
         df_pick_billing['Clean_Del'] = df_pick_billing['Delivery'].apply(safe_del)
         picked_mats_by_del = df_pick_billing.groupby('Clean_Del')['Material'].apply(lambda x: set(x.astype(str).str.strip())).to_dict()
-        
+
         if 'Pohyby_Rukou' not in df_pick_billing.columns:
             df_pick_billing['Pohyby_Rukou'] = 0
-            
+
         def is_row_voll(row):
             d = row['Clean_Del']
             hu = safe_hu(row.get('Handling Unit', ''))
@@ -126,7 +127,7 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
         c_role = next((c for c in df_vbpa.columns if "Partnerrolle" in str(c) or "Partner Function" in str(c)), None)
         c_kred = next((c for c in df_vbpa.columns if "Kreditor" in str(c) or "Vendor" in str(c)), None)
         c_deb = next((c for c in df_vbpa.columns if "Debitor" in str(c) or "Customer" in str(c)), None)
-        
+
         if c_role and (c_kred or c_deb):
             idx_beleg = next((i for i, c in enumerate(df_vbpa.columns) if c == c_beleg), -1)
             idx_role = next((i for i, c in enumerate(df_vbpa.columns) if c == c_role), -1)
@@ -141,25 +142,25 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
                         del_is_kep[safe_del(row[idx_beleg])] = True
 
     all_active_dels = vekp_filtered['Clean_Del'].unique()
-    
+
     # 💥 ODSTRANĚNÍ NEKONEČNÉHO O(N*M) ÚZKÉHO HRDLA
     df_pick_queues_cache = {}
     if not df_pick_billing.empty:
         for d_pick, grp_pick in df_pick_billing.groupby('Clean_Del'):
             df_pick_queues_cache[d_pick] = set(grp_pick['Queue'].dropna().astype(str).str.upper().unique())
-            
+
     for d in all_active_dels:
         if d not in del_base_map:
             vs = del_vs_map.get(d, "")
             is_kep = del_is_kep.get(d, False)
-            
+
             if vs == 'FM20': base = 'N'
             elif vs == 'FM21': base = 'E'
             elif vs == 'FM22': base = 'E'
             elif vs == 'FM23': base = 'N'
             elif vs == 'FM24': base = 'O'
             else: base = 'N' 
-            
+
             if is_kep:
                 if base == 'N': base = 'E'
                 if base == 'O': base = 'OE'
@@ -171,7 +172,7 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
                     if has_parcel and not has_pallet:
                         if base == 'N': base = 'E'
                         if base == 'O': base = 'OE'
-                        
+
             del_base_map[d] = base
 
     # ---------------------------------------------------------
@@ -181,19 +182,19 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
     if df_vepo is not None and not df_vepo.empty:
         vepo_clean = df_vepo.copy()
         v_cols_lower = [str(c).lower().strip() for c in vepo_clean.columns]
-        
+
         v_hu_cols = [c for c, l in zip(vepo_clean.columns, v_cols_lower) if "internal" in l or "intern" in l or "handling unit" == l or "manipul" in l or "mj" in l]
         v_mat_cols = [c for c, l in zip(vepo_clean.columns, v_cols_lower) if "material" in l or "materiál" in l]
-        
+
         if v_hu_cols: vepo_clean['Uni_HU'] = vepo_clean[v_hu_cols].bfill(axis=1).iloc[:, 0]
         else: vepo_clean['Uni_HU'] = vepo_clean.iloc[:, 0]
-        
+
         if v_mat_cols:
             vepo_clean['Uni_Mat'] = vepo_clean[v_mat_cols].bfill(axis=1).iloc[:, 0]
-            
+
             idx_hu = next((i for i, c in enumerate(vepo_clean.columns) if c == 'Uni_HU'), -1)
             idx_mat = next((i for i, c in enumerate(vepo_clean.columns) if c == 'Uni_Mat'), -1)
-            
+
             vepo_dropna = vepo_clean.dropna(subset=['Uni_HU', 'Uni_Mat'])
             for row in vepo_dropna.to_numpy():
                 h = safe_hu(row[idx_hu])
@@ -212,10 +213,10 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
         if visited is None: visited = set()
         if node in visited: return []
         visited.add(node)
-        
+
         if node not in children_map or not children_map[node]: 
             return [node]
-        
+
         leaves = []
         for child in children_map[node]:
             leaves.extend(get_leaves(child, visited))
@@ -256,32 +257,32 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
                 cat = f"{base} Vollpalette"
                 if base == "OE": cat = "O Vollpalette" 
                 if base == "E": cat = "N Vollpalette"  
-                
+
                 mats = set()
                 for leaf in leaves: 
                     mats.update(vepo_mats.get(leaf, set()))
-                    
+
                 real_mats = {m for m in mats if m in valid_picked_mats}
                 if not real_mats and len(mats) > 0: real_mats = mats
-                
+
                 del_hu_counts.append({'Clean_Del': d, 'Category_Full': cat, 'pocet_hu': 1})
                 hu_details_list.append({'Clean_Del': d, 'HU_Ext': ext_hu, 'HU_Int': root_hu, 'Is_Vollpalette': 'ANO', 'Category_Full': cat, 'Materials': ", ".join(real_mats)})
-                
+
                 for m in real_mats:
                     if (d, m) not in del_mat_cats: del_mat_cats[(d, m)] = set()
                     del_mat_cats[(d, m)].add(cat)
-                    
+
             else:
                 mats = set()
                 for leaf in leaves: 
                     mats.update(vepo_mats.get(leaf, set()))
-                    
+
                 real_mats = {m for m in mats if m in valid_picked_mats}
                 if not real_mats and len(mats) > 0: real_mats = mats 
-                
+
                 if len(real_mats) > 0:
                     cat = f"{base} Sortenrein" if len(real_mats) == 1 else f"{base} Misch"
-                    
+
                     del_hu_counts.append({'Clean_Del': d, 'Category_Full': cat, 'pocet_hu': 1})
                     hu_details_list.append({'Clean_Del': d, 'HU_Ext': ext_hu, 'HU_Int': root_hu, 'Is_Vollpalette': 'NE', 'Category_Full': cat, 'Materials': ", ".join(real_mats)})
 
@@ -311,11 +312,11 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
                 if base == "OE": return "O Vollpalette"
                 if base == "E": return "N Vollpalette"
                 return f"{base} Vollpalette"
-                
+
             mat = str(row.get('Material', '')).strip()
             cats = del_mat_cats.get((d, mat), set())
             valid_cats = {c for c in cats if "Vollpalette" not in c}
-            
+
             if len(valid_cats) == 1: return list(valid_cats)[0]
             elif len(valid_cats) > 1: return f"{base} Misch" 
             else:
@@ -340,7 +341,7 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
 
     billing_df['Delivery'] = billing_df['Clean_Del']
     billing_df['Clean_Del_Merge'] = billing_df['Clean_Del']
-    
+
     if not df_pick_billing.empty:
         del_metadata = df_pick_billing.groupby('Clean_Del').agg(
             Month=('Month', 'first'),
@@ -366,44 +367,44 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
 @fast_render
 def render_reliability_report(df_pick, df_vekp, df_vepo):
     if df_vekp is None or df_vekp.empty: return
-    
+
     st.markdown("<div class='section-header'><h3>🛡️ Spolehlivost dat a chybějící záznamy</h3></div>", unsafe_allow_html=True)
-    
+
     df_vekp_clean = df_vekp.copy()
     cols_lower = [str(c).lower().strip() for c in df_vekp_clean.columns]
-    
+
     c_del = [c for c, l in zip(df_vekp_clean.columns, cols_lower) if "delivery" in l or "lieferung" in l or "dodávka" in l or "dodavka" in l or "zakázka" in l or "zakazka" in l]
     c_hu = [c for c, l in zip(df_vekp_clean.columns, cols_lower) if "internal" in l or "intern" in l or "handling unit" == l or "manipul" in l or "mj" in l]
-    
+
     df_vekp_clean['Clean_Del'] = df_vekp_clean[c_del].bfill(axis=1).iloc[:, 0].apply(safe_del) if c_del else ""
     df_vekp_clean['Clean_HU'] = df_vekp_clean[c_hu].bfill(axis=1).iloc[:, 0].apply(safe_hu) if c_hu else ""
-    
+
     all_dels = df_vekp_clean[df_vekp_clean['Clean_Del'] != '']['Clean_Del'].unique()
     pick_dels = set(df_pick['Delivery'].apply(safe_del)) if df_pick is not None else set()
-    
+
     likp_dels = set()
     df_likp = load_from_db('raw_likp')
     if df_likp is not None and not df_likp.empty:
         l_cols_lower = [str(c).lower().strip() for c in df_likp.columns]
         c_likp_del = next((c for c, l in zip(df_likp.columns, l_cols_lower) if "delivery" in l or "lieferung" in l or "dodávka" in l or "zakázka" in l), df_likp.columns[0])
         likp_dels = set(df_likp[c_likp_del].apply(safe_del))
-        
+
     vepo_hus = set()
     if df_vepo is not None and not df_vepo.empty:
         v_cols_lower = [str(c).lower().strip() for c in df_vepo.columns]
         c_vepo_hu = [c for c, l in zip(df_vepo.columns, v_cols_lower) if "internal" in l or "intern" in l or "handling unit" == l or "manipul" in l or "mj" in l]
         if c_vepo_hu:
             vepo_hus = set(df_vepo[c_vepo_hu].bfill(axis=1).iloc[:, 0].apply(safe_hu))
-        
+
     del_hu_map = df_vekp_clean.groupby('Clean_Del')['Clean_HU'].apply(set).to_dict()
-    
+
     missing_data = []
     for d in all_dels:
         has_pick = d in pick_dels
         has_likp = d in likp_dels
         d_hus = del_hu_map.get(d, set())
         has_vepo = len(d_hus.intersection(vepo_hus)) > 0
-        
+
         if not (has_pick and has_likp and has_vepo):
             missing_data.append({
                 'Zakázka (Delivery)': d,
@@ -411,11 +412,11 @@ def render_reliability_report(df_pick, df_vekp, df_vepo):
                 'LIKP (Brány)': '✅ OK' if has_likp else '❌ Chybí',
                 'VEPO (Materiály)': '✅ OK' if has_vepo else '❌ Chybí (Prázdné)'
             })
-            
+
     total_dels = len(all_dels)
     perfect_dels = total_dels - len(missing_data)
     reliability_pct = (perfect_dels / total_dels * 100) if total_dels > 0 else 0
-    
+
     col1, col2 = st.columns([1, 3])
     with col1:
         st.metric("Spolehlivost datových podkladů", f"{reliability_pct:.1f} %", help="Procento fakturovaných zakázek, které mají kompletní záznamy ve všech nahraných tabulkách.")
@@ -510,7 +511,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
         col_t1, col_t2 = st.columns([1.2, 1])
         with col_t1:
             st.markdown(f"**{_t('Souhrn podle kategorií zabalených HU (Zisky a Ztráty)', 'Summary by Packed HU Categories (Profit & Loss)')}**")
-            
+
             cat_sum = billing_df.groupby("Category_Full").agg(
                 pocet_casti=("Delivery", "count"), 
                 pocet_to=("pocet_to", "sum"), 
@@ -521,9 +522,9 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 bilance=("Bilance", "sum"), 
                 to_navic=("TO_navic", "sum")
             ).reset_index()
-            
+
             cat_sum["prum_poh"] = np.where(cat_sum["pocet_lok"] > 0, cat_sum["poh"] / cat_sum["pocet_lok"], 0)
-            
+
             disp = cat_sum[["Category_Full", "pocet_casti", "pocet_to", "pocet_hu", "pocet_mat", "prum_poh", "bilance", "to_navic"]].copy()
             disp.columns = [
                 _t("Kategorie HU", "HU Category"), 
@@ -535,18 +536,18 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 _t("Čistá bilance (Zisk/Ztráta)", "Net Balance (Profit/Loss)"), 
                 _t("Hrubá ztráta (TO navíc)", "Gross Loss (Extra TO)")
             ]
-            
+
             st.dataframe(disp.style.format({_t("Prům. pohybů na lokaci", "Avg Moves/Location"): "{:.1f}"}), width="stretch", hide_index=True)
-            
+
             st.markdown(f"<br>**🔍 {_t('Detailní seznam částí zakázek podle kategorie:', 'Detailed Order Parts List by Category:')}**", unsafe_allow_html=True)
             cat_opts = [_t("— Vyberte kategorii pro detail —", "— Select Category for Detail —")] + sorted(billing_df["Category_Full"].dropna().unique().tolist())
             sel_detail_cat = st.selectbox("Vyberte", options=cat_opts, label_visibility="collapsed")
-            
+
             if sel_detail_cat != _t("— Vyberte kategorii pro detail —", "— Select Category for Detail —"):
                 det_df = billing_df[billing_df["Category_Full"] == sel_detail_cat].copy()
                 det_df["prum_poh_lok"] = np.where(det_df["pocet_lokaci"] > 0, det_df["pohyby_celkem"] / det_df["pocet_lokaci"], 0)
                 det_df = det_df.sort_values(by="Bilance", ascending=False)
-                
+
                 disp_det = det_df[["Delivery", "pocet_to", "pocet_hu", "pocet_mat", "prum_poh_lok", "Bilance"]].copy()
                 disp_det.columns = [
                     _t("Zakázka (Delivery)", "Order (Delivery)"), 
@@ -556,7 +557,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                     _t("Prům. pohybů na lok.", "Avg Moves/Loc"), 
                     _t("Čistá bilance (TO navíc)", "Net Balance (Extra TO)")
                 ]
-                
+
                 def color_bilance_simple(val):
                     try:
                         if val > 0: return 'color: #ef4444; font-weight: bold'
@@ -568,7 +569,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                     styled_det = disp_det.style.format({_t("Prům. pohybů na lok.", "Avg Moves/Loc"): "{:.1f}"}).map(color_bilance_simple, subset=[_t("Čistá bilance (TO navíc)", "Net Balance (Extra TO)")])
                 except AttributeError:
                     styled_det = disp_det.style.format({_t("Prům. pohybů na lok.", "Avg Moves/Loc"): "{:.1f}"}).applymap(color_bilance_simple, subset=[_t("Čistá bilance (TO navíc)", "Net Balance (Extra TO)")])
-                
+
                 st.dataframe(styled_det, width="stretch", hide_index=True)
 
         with col_t2:
@@ -577,12 +578,12 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
             def interactive_chart():
                 cat_options = [_t("Všechny kategorie", "All Categories")] + sorted(billing_df["Category_Full"].dropna().unique().tolist())
                 selected_cat = st.selectbox(_t("Vyberte kategorii pro graf:", "Select category for chart:"), options=cat_options, label_visibility="collapsed", key="billing_chart_cat")
-                
+
                 if selected_cat == _t("Všechny kategorie", "All Categories"):
                     plot_df = billing_df.copy()
                 else:
                     plot_df = billing_df[billing_df["Category_Full"] == selected_cat].copy()
-                
+
                 tr_df = plot_df.groupby("Month").agg(
                     to_sum=("pocet_to", "sum"), 
                     hu_sum=("pocet_hu", "sum"), 
@@ -590,9 +591,9 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                     poh=("pohyby_celkem", "sum"), 
                     lok=("pocet_lokaci", "sum")
                 ).reset_index()
-                
+
                 tr_df['prum_poh'] = np.where(tr_df['lok']>0, tr_df['poh']/tr_df['lok'], 0)
-                
+
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
                     x=tr_df['Month'], 
@@ -629,7 +630,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                     textfont=dict(color='#f43f5e'), 
                     line=dict(color='#f43f5e', width=3)
                 ))
-                
+
                 fig.update_layout(
                     yaxis2=dict(title=_t("Pohyby", "Moves"), side="right", overlaying="y", showgrid=False), 
                     plot_bgcolor="rgba(0,0,0,0)", 
@@ -638,13 +639,13 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                     legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0)
                 )
                 st.plotly_chart(fig, width="stretch")
-            
+
             interactive_chart()
 
         st.divider()
         st.markdown(f"### 💎 {_t('Analýza efektivity a ziskovosti (Master Data)', 'Efficiency & Profitability Analysis (Master Data)')}")
         st.markdown(_t("Tato tabulka odhaluje skutečnou hloubku finančních úniků z konsolidace a fyzickou náročnost na 1 fakturační jednotku.", "This table reveals the true depth of financial leaks from consolidation and the physical effort per 1 billed unit."))
-        
+
         with st.expander(f"📖 {_t('Vysvětlení výpočtů ve sloupcích', 'Explanation of Column Calculations')}"):
             st.markdown(_t("""
             * **Index konsolidace (TO/HU):** Kolik pickovacích úkolů (TO) musí skladník průměrně udělat na vytvoření 1 vyfakturované jednotky (HU). Ideál je 1.0. Čím vyšší číslo, tím více TO se "slévá" a ztrácí.
@@ -661,14 +662,14 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
             * **More HU (Profit) / Profit (pcs HU):** Orders where 1 pick split into multiple billed units. The Profit column shows *extra* billed HUs.
             * **Net Balance (HU - TO):** Total category result. Green = profit. Red = loss.
             """))
-        
+
         billing_df['is_1_to_1'] = (billing_df['pocet_to'] == billing_df['pocet_hu']).astype(int)
         billing_df['is_more_to'] = (billing_df['pocet_to'] > billing_df['pocet_hu']).astype(int)
         billing_df['is_more_hu'] = (billing_df['pocet_to'] < billing_df['pocet_hu']).astype(int)
-        
+
         billing_df['ztrata_to'] = np.where(billing_df['is_more_to'], billing_df['pocet_to'] - billing_df['pocet_hu'], 0)
         billing_df['zisk_hu'] = np.where(billing_df['is_more_hu'], billing_df['pocet_hu'] - billing_df['pocet_to'], 0)
-        
+
         ratio_table = billing_df.groupby('Category_Full').agg(
             celkem=('Delivery', 'count'), 
             to_celkem=('pocet_to', 'sum'), 
@@ -681,26 +682,26 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
             count_more_hu=('is_more_hu', 'sum'), 
             zisk_hu=('zisk_hu', 'sum')
         ).reset_index()
-        
+
         def format_pct(count, total):
             if total == 0: return "0 (0.0%)"
             return f"{int(count)} ({(count/total*100):.1f}%)"
-        
+
         ratio_table['1:1 (Ideál)'] = ratio_table.apply(lambda r: format_pct(r['count_1_1'], r['celkem']), axis=1)
         ratio_table['Více TO (Počet)'] = ratio_table.apply(lambda r: format_pct(r['count_more_to'], r['celkem']), axis=1)
         ratio_table['Více HU (Počet)'] = ratio_table.apply(lambda r: format_pct(r['count_more_hu'], r['celkem']), axis=1)
-        
+
         ratio_table['Index (TO na 1 HU)'] = np.where(ratio_table['hu_celkem'] > 0, ratio_table['to_celkem'] / ratio_table['hu_celkem'], 0)
         ratio_table['Pohyby na 1 HU'] = np.where(ratio_table['hu_celkem'] > 0, ratio_table['pohyby_celkem'] / ratio_table['hu_celkem'], 0)
         ratio_table['Čistá bilance'] = ratio_table['hu_celkem'] - ratio_table['to_celkem'] 
-        
+
         disp_ratio = ratio_table[[
             'Category_Full', 'celkem', 'to_celkem', 'hu_celkem', 'mat_celkem', 
             'Index (TO na 1 HU)', 'Pohyby na 1 HU', 
             '1:1 (Ideál)', 'Více TO (Počet)', 'ztrata_to', 
             'Více HU (Počet)', 'zisk_hu', 'Čistá bilance'
         ]].copy()
-        
+
         disp_ratio.columns = [
             _t("Kategorie HU", "HU Category"), 
             _t("Částí zakázek", "Order Parts"), 
@@ -716,7 +717,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
             _t("Zisk (ks HU)", "Profit (pcs HU)"), 
             _t("Čistá bilance (HU - TO)", "Net Balance (HU - TO)")
         ]
-        
+
         def style_master_table(val):
             try:
                 if isinstance(val, (int, float)) and val > 0 and 'Ztráta' not in str(val) and 'Loss' not in str(val):
@@ -725,7 +726,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                     return 'color: #ef4444; font-weight: bold'
             except: pass
             return ''
-            
+
         try:
             styled_master = disp_ratio.style.format({
                 _t("Index konsolidace (TO/HU)", "Consolidation Index (TO/HU)"): "{:.2f} TO", 
@@ -740,11 +741,11 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 _t("Ztráta (ks TO)", "Loss (pcs TO)"): "- {}",
                 _t("Zisk (ks HU)", "Profit (pcs HU)"): "+ {}"
             }).applymap(style_master_table, subset=[_t("Čistá bilance (HU - TO)", "Net Balance (HU - TO)")])
-        
+
         st.dataframe(styled_master, width="stretch", hide_index=True)
-            
+
         st.markdown(f"<br>**{_t('Trend typů zakázek (Měsíce)', 'Trend of Order Types (Months)')}**", unsafe_allow_html=True)
-        
+
         all_trend_cats = sorted(billing_df['Category_Full'].dropna().unique().tolist())
         sel_trend_cats = st.multiselect(
             _t("Vyberte kategorie pro zobrazení trendu:", "Select categories for trend chart:"), 
@@ -752,7 +753,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
             default=all_trend_cats, 
             key="trend_ratio_cats"
         )
-        
+
         if sel_trend_cats:
             trend_df_filtered = billing_df[billing_df['Category_Full'].isin(sel_trend_cats)].copy()
             trend_ratio = trend_df_filtered.groupby('Month').agg(
@@ -760,12 +761,12 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 count_more_to=('is_more_to', 'sum'), 
                 count_more_hu=('is_more_hu', 'sum')
             ).reset_index()
-            
+
             trend_ratio['total'] = trend_ratio['count_1_1'] + trend_ratio['count_more_to'] + trend_ratio['count_more_hu']
             trend_ratio['pct_1_1'] = np.where(trend_ratio['total'] > 0, trend_ratio['count_1_1'] / trend_ratio['total'] * 100, 0)
             trend_ratio['pct_more_to'] = np.where(trend_ratio['total'] > 0, trend_ratio['count_more_to'] / trend_ratio['total'] * 100, 0)
             trend_ratio['pct_more_hu'] = np.where(trend_ratio['total'] > 0, trend_ratio['count_more_hu'] / trend_ratio['total'] * 100, 0)
-            
+
             fig_r = go.Figure()
             fig_r.add_trace(go.Bar(
                 x=trend_ratio['Month'], 
@@ -794,7 +795,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 textposition='inside', 
                 yaxis='y'
             ))
-            
+
             fig_r.add_trace(go.Scatter(
                 x=trend_ratio['Month'], 
                 y=trend_ratio['pct_1_1'], 
@@ -828,7 +829,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
                 line=dict(width=3), 
                 yaxis='y2'
             ))
-            
+
             fig_r.update_layout(
                 barmode='stack', 
                 plot_bgcolor="rgba(0,0,0,0)", 
@@ -845,7 +846,7 @@ def render_billing(df_pick, df_vekp, df_vepo, df_cats, queue_count_col, aus_data
         st.divider()
         st.markdown(f"### ⚠️ {_t('Žebříček neefektivity z konsolidace (Práce zdarma)', 'Inefficiency Ranking from Consolidation (Free Labor)')}")
         imb_df = billing_df[billing_df['TO_navic'] > 0].sort_values("TO_navic", ascending=False).head(50)
-        
+
         if not imb_df.empty:
             imb_disp = imb_df[['Delivery', 'Category_Full', 'pocet_to', 'pohyby_celkem', 'pocet_hu', 'pocet_mat', 'TO_navic']].copy()
             imb_disp.columns = [

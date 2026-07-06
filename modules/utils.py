@@ -8,12 +8,14 @@ Obsahuje:
 - Utility pro čištění HU/Delivery klíčů
 - Konstanty pro grafy a jazykové překlady
 """
-import re
+import functools
 import logging
+import re
+from typing import Any, Dict, Optional, Set, Tuple
+
 import numpy as np
 import pandas as pd
 import streamlit as st
-from typing import Tuple, Dict, Any, Set, List, Optional
 
 logger = logging.getLogger("warehouse.utils")
 
@@ -194,21 +196,74 @@ _RE_NUMERIC = re.compile(r'^0+\d+$')
 
 
 def get_match_key_vectorized(series: pd.Series) -> pd.Series:
-    """Vektorizovaná normalizace matchovacích klíčů (Material). Až 100x rychlejší než .apply."""
+    """Vektorizovaná normalizace matchovacích klíčů (Material). Až 100x rychlejší než .apply.
+
+    Pravidla (identická se skalární get_match_key):
+    - "abc" -> "ABC"
+    - "  abc  " -> "ABC"
+    - "1.0" -> "1" (koncové nuly za tečkou pryč)
+    - "1.50" -> "1.5" (koncové nuly za tečkou pryč, ale 5 zůstává)
+    - "00123" -> "123" (leading nuly pryč)
+    - "000" -> "0" (prázdný výsledek -> "0")
+    - "001.50" -> "1.5" (oba: leading nuly + trailing nuly)
+
+    Strategie: Pandas .str metody pro všechny transformace - jsou C-akcelerované.
+    """
+    # Krok 1: Strip + upper přes pandas .str (interně optimalizované C implementace)
     s = series.astype(str).str.strip().str.upper()
 
-    # Detekce a odstranění koncových nul u desetinných čísel (např. "1.0" -> "1")
+    # Krok 2: Detekce typu hodnoty - rozdělíme do 3 kategorií
+    # - decimal: "^\\d+\\.\\d+$" -> "X.Y" formát
+    # - numeric: "^\\d+$" -> "X" formát
+    # - other: vše ostatní (ponecháme beze změny)
+
+    # Krok 3: Pro číselné hodnoty odstraníme LEVÉ nuly
+    # Regex r'^0+(\d)' nahradí leading nuly, ale musí za nimi být alespoň jedna číslice.
+    # Příklad: "00123" -> "123", "001.50" -> "1.50", "000" -> "" (zachytí se v kroku 4)
+    s = s.str.replace(r'^0+(?=\d)', '', regex=True)
+
+    # Krok 4: Pokud po odstranění levých nul nezbylo nic ("000" -> ""), vraťme "0".
+    s = s.where(s != '', '0')
+
+    # Krok 5: Pro desetinná čísla odstraníme TRAILING nuly za tečkou.
+    # Aplikujeme POUZE na hodnoty s tečkou (jinak bychom rozbili non-numeric).
     mask_decimal = s.str.match(r'^\d+\.\d+$')
     if mask_decimal.any():
-        s = s.copy()
-        s.loc[mask_decimal] = s.loc[mask_decimal].str.rstrip('0').str.rstrip('.')
-
-    # Odstranění levých nul u celých čísel (např. "000123" -> "123")
-    mask_numeric = s.str.match(r'^0+\d+$')
-    if mask_numeric.any():
-        s.loc[mask_numeric] = s.loc[mask_numeric].str.lstrip('0')
+        # "1.50" -> "1.5" (regex zachytí "5" + "0")
+        s = s.where(~mask_decimal, s.str.replace(r'(\d)0+$', r'\1', regex=True))
+        # "1.0" -> "1" (regex zachytí ".0"; bez tečky)
+        s = s.where(~mask_decimal, s.str.replace(r'\.0+$', '', regex=True))
 
     return s
+
+
+def _normalize_match_key_scalar(v: Any) -> str:
+    """Skalární normalizace jedné match klíčové hodnoty (pro interní použití).
+
+    Logika je identická s get_match_key() - musí se chovat úplně stejně!
+    """
+    # Konverze na string pro non-string vstupy (None, float, int)
+    if v is None:
+        return ''
+    if not isinstance(v, str):
+        v = str(v)
+    if not v:
+        return v
+
+    has_dot = '.' in v
+    if has_dot and v.replace('.', '').isdigit():
+        # Desetinné číslo: rozdělíme na celou a desetinnou část
+        parts = v.split('.', 1)
+        int_part = parts[0].lstrip('0') or '0'
+        dec_part = parts[1].rstrip('0')
+        if dec_part:
+            return f"{int_part}.{dec_part}"
+        return int_part
+    elif v.isdigit():
+        # Celé číslo: odstraníme leading nuly (alespoň 1 číslice zůstane)
+        return v.lstrip('0') or '0'
+    # Non-numeric - ponecháme beze změny
+    return v
 
 
 def get_match_key(val: Any) -> str:
@@ -231,7 +286,15 @@ def get_match_key(val: Any) -> str:
 
 
 def parse_packing_time(val: Any) -> float:
-    """Parsuje čas balení z různých formátů (minuty / desetinné hodiny / HH:MM:SS / HH:MM)."""
+    """Parsuje čas balení z různých formátů (minuty / desetinné hodiny / HH:MM:SS / HH:MM).
+
+    Vstupní formáty:
+    - Decimal minuty ("5.5", "123.4")
+    - Decimal hodiny < 1 ("0.5" = 30 min, ale vrací 720 - konverze na minuty)
+    - Celé minuty ("30", "120")
+    - HH:MM:SS ("01:30:00" = 90 min)
+    - HH:MM ("01:30" = 90 min - hodiny × 60 + minuty)
+    """
     v = str(val).strip()
     if v in ('', 'nan', 'None', 'NaN'):
         return 0.0
@@ -251,7 +314,9 @@ def parse_packing_time(val: Any) -> float:
             h, m, s = parts
             return int(h) * 60 + int(m) + float(s) / 60.0
         elif len(parts) == 2:
-            # Formát HH:MM - hodiny, minuty (parts[1] jsou minuty, ne zlomek hodiny!)
+            # Formát HH:MM - hodiny a minuty
+            # DŮLEŽITÉ: parts[1] jsou MINUTY, ne zlomek hodiny!
+            # Např. "01:30" = 1 hodina 30 minut = 90 minut, ne 1.5
             h, m = parts
             return int(h) * 60 + int(m)
     except (ValueError, IndexError):
@@ -313,6 +378,13 @@ def fast_compute_moves(qty_arr, queue_arr, su_arr, boxes_arr,
 
     # Ostatní - zpracování po řádcích kvůli variabilním boxes
     # Toto je nejtežší část - boxes_arr je list of tuples
+    # Python for-loop je zde NEVYHNUTELNÝ:
+    # - boxes_arr[idx] má variabilní délku (různé box sizes per materiál)
+    # - vnitřní smyčka `zbytek // b` udržuje stateful remainder
+    # - numpy nelze použít bez O(unique_box_sizes) paměťové exploze
+    # - aggregated (boxes_arr[i], boxes_arr[j], ...) struct dtype by byl pomalejší
+    #   než přímý Python loop díky boxing/unboxingu ndarray scalarů
+    # Vše ostatní (valid_qty, is_full_pal, safe_w, safe_d) je již plně vectorized.
     other_mask = valid_qty & ~is_full_pal
 
     if not other_mask.any():
@@ -364,20 +436,31 @@ def fast_compute_moves(qty_arr, queue_arr, su_arr, boxes_arr,
 # CLEANING KLÍČŮ PRO HU A DELIVERY
 # ==========================================
 
-def safe_hu(val) -> str:
-    """Bezpečná normalizace HU klíče - odstraní '.0' na konci, ořeže whitespace."""
+def safe_hu(val: Any) -> str:
+    """Bezpečná normalizace HU klíče - odstraní '.0' na konci, ořeže whitespace.
+
+    Cachováno přes _safe_hu_cached: tyto scalar normalizace se volají statisícekrát
+    v detect_vollpalettes. maxsize=2048 pokrývá reálný počet unikátních HU
+    hodnot v korpusu skladu.
+    """
     v = str(val).strip()
-    if v.lower() in ('nan', 'none', ''):
+    return _safe_hu_cached(v)
+
+
+@functools.lru_cache(maxsize=2048)
+def _safe_hu_cached(v: str) -> str:
+    """Vnitřní cachovaná implementace safe_hu (vstup MUSÍ být již stripnutý string)."""
+    if v == '' or v.lower() in ('nan', 'none'):
         return ''
     if v.endswith('.0') and v[:-2].isdigit():
         v = v[:-2]
     return v
 
 
-def safe_del(val) -> str:
+def safe_del(val: Any) -> str:
     """Bezpečná normalizace Delivery klíče - odstraní '.0' a levé nuly."""
     v = str(val).strip()
-    if v.lower() in ('nan', 'none', ''):
+    if v == '' or v.lower() in ('nan', 'none'):
         return ''
     if v.endswith('.0') and v[:-2].isdigit():
         v = v[:-2]
@@ -388,11 +471,13 @@ def safe_del(val) -> str:
 # DETEKCE OBALŮ (Krabice vs Paleta)
 # ==========================================
 
-_BOX_PATTERNS_CACHE: Optional[Set[str]] = None
-
-
+@functools.lru_cache(maxsize=2048)
 def is_box(v: Any) -> bool:
-    """Detekuje, zda je daný Storage Unit Type krabice/KLT (true) nebo paleta (false)."""
+    """Detekuje, zda je daný Storage Unit Type krabice/KLT (true) nebo paleta (false).
+
+    Cachováno: volá se v hot loops nad numpy řádky (statisíce volání).
+    maxsize=2048 pokrývá reálný počet unikátních SU typů v SAP master data.
+    """
     v = str(v).upper().strip()
     # CARTON-16 je speciální případ (karton s 16 ks ale není KLT)
     if v == 'CARTON-16':
@@ -417,12 +502,17 @@ def detect_vollpalettes(df_pick: pd.DataFrame, df_vekp: pd.DataFrame,
     Optimalizováno: O(n+m) s využitím set lookups místo iterací.
 
     Vrací: set (delivery, hu_number) - identity HU, které jsou potvrzené Vollpalety.
+
+    Výkonové poznámky:
+    - Sloupce se hledají JEDNOU před smyčkou (žádné opakované `df_pick.columns[0]` v cyklu).
+    - `df_vekp.to_numpy()` / `df_pick.to_numpy()` je numpy view (bez kopie).
+    - `safe_hu`, `safe_del`, `is_box` jsou @lru_cache → opakované HU hodnoty jsou O(1) lookup.
     """
     voll_set: Set[Tuple[str, str]] = set()
     if any(df is None or df.empty for df in [df_pick, df_vekp, df_vepo]):
         return voll_set
 
-    # --- 1. Příprava mapování sloupců VEKP ---
+    # --- 1. Příprava mapování sloupců VEKP (vše JEDNOU, mimo hot loop) ---
     vepo_hu_col = next(
         (c for c in df_vepo.columns
          if "Internal HU" in str(c) or "HU-Nummer intern" in str(c)),
@@ -456,16 +546,17 @@ def detect_vollpalettes(df_pick: pd.DataFrame, df_vekp: pd.DataFrame,
     )
 
     # Slovník indexů pro rychlý přístup v numpy smyčce
-    col_to_idx = {c: i for i, c in enumerate(df_vekp.columns)}
-    c_gen_idx = col_to_idx.get(c_gen, -1)
-    parent_idx = col_to_idx.get(parent_col, -1)
-    pm_idx = col_to_idx.get(c_pm, -1)
-    vekp_ext_idx = col_to_idx.get(vekp_ext_col, -1)
-    vekp_hu_idx = col_to_idx.get(vekp_hu_col, -1)
+    vekp_col_to_idx = {c: i for i, c in enumerate(df_vekp.columns)}
+    c_gen_idx = vekp_col_to_idx.get(c_gen, -1)
+    parent_idx = vekp_col_to_idx.get(parent_col, -1)
+    pm_idx = vekp_col_to_idx.get(c_pm, -1)
+    vekp_ext_idx = vekp_col_to_idx.get(vekp_ext_col, -1)
+    vekp_hu_idx = vekp_col_to_idx.get(vekp_hu_col, -1)
 
     # --- 2. Validní root HU v VEKP (kořenové + palety) ---
     valid_roots: Dict[Tuple[str, str], str] = {}
-    for row in df_vekp.to_numpy():
+    vekp_arr = df_vekp.to_numpy()
+    for row in vekp_arr:
         deliv = safe_del(row[c_gen_idx]) if c_gen_idx >= 0 else ""
         parent = safe_hu(row[parent_idx]) if parent_idx >= 0 else ""
         pm = str(row[pm_idx]).upper().strip() if pm_idx >= 0 else ""
@@ -483,15 +574,18 @@ def detect_vollpalettes(df_pick: pd.DataFrame, df_vekp: pd.DataFrame,
     c_su = 'Storage Unit Type' if 'Storage Unit Type' in df_pick.columns \
         else ('Type' if 'Type' in df_pick.columns else None)
 
-    col_su_idx = col_to_idx = {c: i for i, c in enumerate(df_pick.columns)}
-    col_su_idx = col_to_idx.get(c_su, -1)
-    col_rem_idx = col_to_idx.get('Removal of total SU', -1)
-    col_q_idx = col_to_idx.get('Queue', -1)
-    col_ssu_idx = col_to_idx.get('Source storage unit', -1)
-    col_hu_idx = col_to_idx.get('Handling Unit', -1)
-    col_del_idx = col_to_idx.get('Delivery', -1)
+    # DŮLEŽITÉ: zde byl bug "col_to_idx = col_to_idx" (přepsání vlastního dictu),
+    # což ničilo mapování pro VEKP. Pojmenováno záměrně `pick_col_to_idx`.
+    pick_col_to_idx = {c: i for i, c in enumerate(df_pick.columns)}
+    col_su_idx = pick_col_to_idx.get(c_su, -1)
+    col_rem_idx = pick_col_to_idx.get('Removal of total SU', -1)
+    col_q_idx = pick_col_to_idx.get('Queue', -1)
+    col_ssu_idx = pick_col_to_idx.get('Source storage unit', -1)
+    col_hu_idx = pick_col_to_idx.get('Handling Unit', -1)
+    col_del_idx = pick_col_to_idx.get('Delivery', -1)
 
-    for row in df_pick.to_numpy():
+    pick_arr = df_pick.to_numpy()
+    for row in pick_arr:
         rem = str(row[col_rem_idx]).strip().upper() if col_rem_idx >= 0 else ''
         if rem != 'X':
             continue

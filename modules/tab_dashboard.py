@@ -1,13 +1,12 @@
 """
 Dashboard & Queue Analysis - hlavní přehledová stránka.
 """
-import streamlit as st
-import pandas as pd
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
-from modules.utils import t, QUEUE_DESC, CHART_LAYOUT, CHART_COLORS, apply_chart_defaults
-from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
+import streamlit as st
+
+from modules.safe_render import ErrorBoundary, safe_render, validate_dataframe
+from modules.utils import CHART_COLORS, QUEUE_DESC, apply_chart_defaults, t
 
 
 @safe_render(fallback_message="⚠️ Chyba při vykreslování Dashboardu")

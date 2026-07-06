@@ -1,13 +1,11 @@
 """
 TOP Materiály - analýza nejnáročnějších a nejčastěji pickovaných materiálů.
 """
-import streamlit as st
-import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-from modules.utils import t, CHART_LAYOUT, CHART_COLORS, apply_chart_defaults
-from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
+import streamlit as st
 
+from modules.safe_render import ErrorBoundary, safe_render, validate_dataframe
+from modules.utils import apply_chart_defaults
 
 CHART_LAYOUT_LOCAL = dict(
     paper_bgcolor='rgba(0,0,0,0)',

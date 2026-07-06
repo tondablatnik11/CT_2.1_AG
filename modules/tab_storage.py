@@ -1,10 +1,11 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
 import re
-from modules.safe_render import ErrorBoundary, safe_render
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+from modules.safe_render import safe_render
 
 try:
     fast_render = st.fragment
@@ -22,7 +23,7 @@ def extract_num(part):
 def parse_bin_coords(bin_str):
     s = str(bin_str).strip()
     pts = s.split('-')
-    
+
     aisle, stack, level, pos = 0, 0, 0, 0
     try:
         if len(pts) >= 4:
@@ -40,7 +41,7 @@ def parse_bin_coords(bin_str):
             else:
                 aisle = extract_num(s)
     except: pass
-    
+
     return aisle, stack, level, pos
 
 @safe_render(fallback_message="⚠️ Chyba při vykreslování Skladu (Storage)")
@@ -71,7 +72,7 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
     c_bintype_lt = next((c for c in df_lt10.columns if any(k in str(c).upper() for k in ['BIN TYPE', 'TYP MÍST', 'PLATZTYP'])), None)
     c_bin_lt = next((c for c in df_lt10.columns if any(k in str(c).upper() for k in ['STORAGE BIN', 'SKLADOVÉ MÍSTO', 'LAGERPLATZ'])), None)
     c_date_lt = next((c for c in df_lt10.columns if 'LAST MOVEMENT' in str(c).upper() or 'POSLEDNÍ POHYB' in str(c).upper() or 'BEWEGUNG' in str(c).upper()), None)
-    
+
     # Heatmap Pick dataset
     c_pick_bin = None
     if df_pick is not None and not df_pick.empty:
@@ -99,15 +100,15 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
     coords = lx_clean[c_bin_lx].apply(parse_bin_coords).tolist()
     lx_clean['Raw_Aisle'] = [c[0] for c in coords]
     lx_clean['Raw_Stack'] = [c[1] for c in coords]
-    
+
     # Izolace pouze reálných fyzických uliček (ne bufferů) pro vykreslování
     main_layout = lx_clean[(lx_clean['Raw_Aisle'] > 0) & (lx_clean['Raw_Aisle'] <= 150) & (lx_clean['Raw_Stack'] > 0)].copy()
-    
+
     if c_mat_lx:
         main_layout['Is_Empty'] = main_layout[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', '', 'none', 'null'])
     else:
         main_layout['Is_Empty'] = True
-        
+
     if c_pick_bin: main_layout['Picks'] = main_layout[c_bin_lx].astype(str).str.strip().map(pick_counts).fillna(0)
     else: main_layout['Picks'] = 0
 
@@ -123,11 +124,11 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             for sk_zone in zones:
                 df_zone = lx_clean[lx_clean['Zone_Code'] == sk_zone].copy() if sk_zone != 'ALL' else lx_clean.copy()
                 if df_zone.empty: continue
-                
+
                 df_zone['Is_Empty'] = df_zone[c_mat_lx].astype(str).str.strip().str.lower().isin(['<<empty>>', 'nan', '', 'null'])
                 obs, vol = sum(~df_zone['Is_Empty']), sum(df_zone['Is_Empty'])
                 celkem = obs + vol
-                
+
                 st.markdown(f"#### 🏭 Budova / Zóna: {sk_zone}")
                 c_m, c_p, c_b = st.columns([1, 1.2, 2])
                 with c_m:
@@ -153,7 +154,7 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
             # Agregace 3D na 2D pudorys (kolik je v dome vyskove a kapacitne plno)
             agg_2d = main_layout.groupby(['Raw_Aisle', 'Raw_Stack']).agg(Total=('Is_Empty', 'count'), Free=('Is_Empty', 'sum')).reset_index()
             agg_2d['Capacity'] = (agg_2d['Total'] - agg_2d['Free']) / agg_2d['Total']
-            
+
             fig_2d = px.scatter(
                 agg_2d, x='Raw_Aisle', y='Raw_Stack', color='Capacity',
                 color_continuous_scale=[(0, '#10b981'), (0.5, '#fbbf24'), (1, '#ef4444')],
@@ -175,7 +176,7 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
         if c_pick_bin and not main_layout.empty:
             p_agg = main_layout.groupby(['Raw_Aisle', 'Raw_Stack'])['Picks'].sum().reset_index()
             max_p = p_agg['Picks'].max() if p_agg['Picks'].max() > 0 else 1
-            
+
             fig_h = px.scatter(
                 p_agg, x='Raw_Aisle', y='Raw_Stack', color='Picks', size='Picks',
                 color_continuous_scale='Inferno', size_max=25,
@@ -196,21 +197,21 @@ def render_storage(df_lx03, df_lt10, df_marm, df_pick):
         st.markdown("#### 💡 Optimalizace: Cílené přesuny plýtvajícího místa z P na K1")
         col_sl1, _ = st.columns(2)
         with col_sl1: limit_ks = st.number_input("Tolerovaný maximální počet kusů na hledaných pozicích (Downsizing):", 1, 100, 10)
-        
+
         if c_mat_lt and c_qty_lt and c_bintype_lt:
             # Oprava filtrace na neomezeno dimenzemi a striktní typy
             val_t = ['EP1', 'P1', 'EP2', 'P2', 'EP3', 'PE3', 'P3', 'EP4', 'P4']
             lt_ep = lt_clean[lt_clean[c_bintype_lt].astype(str).str.strip().str.upper().isin(val_t)].copy()
             lt_ep['Q_Num'] = pd.to_numeric(lt_ep[c_qty_lt], errors='coerce').fillna(0)
             cands = lt_ep[(lt_ep['Q_Num'] > 0) & (lt_ep['Q_Num'] <= limit_ks)].copy()
-            
+
             if not cands.empty:
                 st.success(f"Nalezeno {len(cands)} zbytečně blokovaných obřích pozic, kde zbývá pouze <= {limit_ks} ks! Vhodné přeskladnit do regálu.")
                 t_disp = cands[[c_bin_lt, c_bintype_lt, c_mat_lt, c_qty_lt]].copy()
                 t_disp.columns = ['Zablokovaná pozice', 'Zablokovaný Typ', 'Materiál (SAP)', 'Počet ks k přehození']
                 st.dataframe(t_disp.sort_values('Počet ks k přehození'), hide_index=True, width="stretch")
             else: st.info(f"Nenalezeny žádné plýtvající boxy (0 výskytů s <= {limit_ks} ks).")
-            
+
         st.divider()
         st.markdown("#### 💀 Audit smrti: Ležáky bez známky života (Dead Stock)")
         if c_date_lt and c_mat_lt:

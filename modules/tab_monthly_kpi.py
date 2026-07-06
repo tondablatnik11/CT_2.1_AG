@@ -7,13 +7,14 @@ Zaměřeno na:
 - Srovnání měsíců mezi sebou
 - Heatmapy zátěže
 """
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from modules.utils import t, CHART_LAYOUT, CHART_COLORS, apply_chart_defaults, safe_del, safe_hu
+import streamlit as st
+
 from modules.safe_render import ErrorBoundary, validate_dataframe
+from modules.utils import CHART_LAYOUT, apply_chart_defaults
 
 try:
     fast_render = st.fragment

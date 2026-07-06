@@ -1,9 +1,8 @@
-import streamlit as st
-import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from modules.utils import t
-from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
+import streamlit as st
+
+from modules.safe_render import safe_render
 
 try:
     fast_render = st.fragment
@@ -19,13 +18,13 @@ def render_board(df_pick, billing_df):
         return
 
     st.divider()
-    
+
     # ---------------------------------------------------------
     # 1. ŘADA: OBJEM VYCHYSTÁVÁNÍ (PICKY A KUSY)
     # ---------------------------------------------------------
     st.markdown("###  Celkový objem vychystávání")
     c1, c2 = st.columns(2)
-    
+
     with c1:
         st.markdown("#### Počet picků v měsících")
         # Pokud je k dispozici Transfer Order Number, spočítáme unikátní úkoly, jinak řádky
@@ -33,7 +32,7 @@ def render_board(df_pick, billing_df):
             pick_trend = df_pick.groupby('Month')['Transfer Order Number'].nunique().reset_index(name='Počet Picků')
         else:
             pick_trend = df_pick.groupby('Month').size().reset_index(name='Počet Picků')
-            
+
         fig_pick = px.bar(pick_trend, x='Month', y='Počet Picků', text='Počet Picků', 
                           color_discrete_sequence=['#3b82f6'], template='plotly_white')
         fig_pick.update_traces(textposition='outside')
@@ -43,10 +42,10 @@ def render_board(df_pick, billing_df):
     with c2:
         st.markdown("#### Počet vypickovaných Kusů v měsících")
         qty_trend = df_pick.groupby('Month')['Qty'].sum().reset_index(name='Počet Kusů')
-        
+
         # Formátování čísel pro lepší čitelnost (např. 100 000 místo 100000)
         qty_trend['Text_Kusu'] = qty_trend['Počet Kusů'].apply(lambda x: f"{int(x):,}").str.replace(",", " ")
-        
+
         fig_qty = px.bar(qty_trend, x='Month', y='Počet Kusů', text='Text_Kusu', 
                           color_discrete_sequence=['#10b981'], template='plotly_white')
         fig_qty.update_traces(textposition='outside')
@@ -59,16 +58,16 @@ def render_board(df_pick, billing_df):
     # 2. ŘADA: VÝKON BALÍRNY (ZAKÁZKY A HU)
     # ---------------------------------------------------------
     st.markdown("###  Balení")
-    
+
     if billing_df is not None and not billing_df.empty:
         # Agregace dat za měsíc (ignorujeme kategorie)
         bill_trend = billing_df.groupby('Month').agg(
             Zabalené_Zakázky=('Delivery', 'nunique'),
             Zabalené_HU=('pocet_hu', 'sum')
         ).reset_index()
-        
+
         fig_bill = go.Figure()
-        
+
         # Sloupec pro zabalené zakázky
         fig_bill.add_trace(go.Bar(
             x=bill_trend['Month'], 
@@ -78,7 +77,7 @@ def render_board(df_pick, billing_df):
             text=bill_trend['Zabalené_Zakázky'], 
             textposition='auto'
         ))
-        
+
         # Sloupec pro zabalené HU
         fig_bill.add_trace(go.Bar(
             x=bill_trend['Month'], 
@@ -88,7 +87,7 @@ def render_board(df_pick, billing_df):
             text=bill_trend['Zabalené_HU'], 
             textposition='auto'
         ))
-        
+
         fig_bill.update_layout(
             barmode='group', # Sloupce budou vedle sebe
             template='plotly_white',

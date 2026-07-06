@@ -1,8 +1,9 @@
-import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from modules.utils import t, safe_hu, safe_del
-from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
+import streamlit as st
+
+from modules.safe_render import safe_render
+from modules.utils import safe_del, safe_hu
 
 try:
     fast_render = st.fragment
@@ -73,7 +74,7 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
 
     valid_dels = set(df_p['Clean_Del'].dropna().unique())
     billing_df_filtered = billing_df[billing_df['Clean_Del'].isin(valid_dels)]
-    
+
     billed_n_voll = billing_df_filtered[billing_df_filtered['Category_Full'] == 'N Vollpalette']['pocet_hu'].sum()
     billed_o_voll = billing_df_filtered[billing_df_filtered['Category_Full'].isin(['O Vollpalette', 'OE Vollpalette'])]['pocet_hu'].sum()
 
@@ -129,20 +130,20 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
     for m in months:
         m_df = to_agg_full[to_agg_full['Month'] == m]
         valid_dels_m = set(m_df['Delivery'].unique())
-        
+
         # Billing pro daný měsíc přesně tak jak odjel na skeneru
         m_bill = billing_df[billing_df['Clean_Del'].isin(valid_dels_m)]
-        
+
         chart_data.append({
             'Month': m,
             'FU_Tasks': m_df[(m_df['Queue_UPPER'] == 'PI_PL_FU') & (m_df['Is_FU_Any'])].shape[0],
             'FU_Untouched': m_df[(m_df['Queue_UPPER'] == 'PI_PL_FU') & (m_df['Is_FU_Any']) & (m_df['Is_Untouched'])].shape[0],
             'Billed_N': m_bill[m_bill['Category_Full'] == 'N Vollpalette']['pocet_hu'].sum(),
-            
+
             'FUOE_Tasks': m_df[(m_df['Queue_UPPER'] == 'PI_PL_FUOE') & (m_df['Is_FU_Any'])].shape[0],
             'FUOE_Untouched': m_df[(m_df['Queue_UPPER'] == 'PI_PL_FUOE') & (m_df['Is_FU_Any']) & (m_df['Is_Untouched'])].shape[0],
             'Billed_O': m_bill[m_bill['Category_Full'].isin(['O Vollpalette', 'OE Vollpalette'])]['pocet_hu'].sum(),
-            
+
             'Ideal': m_df[(m_df['Is_FU_Any']) & (m_df['Is_Untouched']) & (m_df['Is_Voll_Billed'])].shape[0],
             'Lost': m_df[(m_df['Is_FU_Any']) & (~m_df['Is_Voll_Billed'])].shape[0]
         })
@@ -152,21 +153,21 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
     if not df_chart.empty:
         st.markdown(f"### 📈 {_t('Trend v čase (Všechny měsíce)', 'Trend Over Time (All Months)')}")
         fig = go.Figure()
-        
+
         # PI_PL_FU 
         fig.add_trace(go.Scatter(x=df_chart['Month'], y=df_chart['FU_Tasks'], name='PI_PL_FU (Celkem úkolů na skeneru)', mode='lines+markers', line=dict(color='#3b82f6')))
         fig.add_trace(go.Scatter(x=df_chart['Month'], y=df_chart['FU_Untouched'], name='PI_PL_FU (Nepřebalováno)', mode='lines+markers', line=dict(color='#93c5fd', dash='dash')))
         fig.add_trace(go.Scatter(x=df_chart['Month'], y=df_chart['Billed_N'], name='Fakturace: N Vollpalette', mode='lines+markers', line=dict(color='#10b981', width=3)))
-        
+
         # PI_PL_FUOE 
         fig.add_trace(go.Scatter(x=df_chart['Month'], y=df_chart['FUOE_Tasks'], name='PI_PL_FUOE (Celkem úkolů na skeneru)', mode='lines+markers', line=dict(color='#f97316')))
         fig.add_trace(go.Scatter(x=df_chart['Month'], y=df_chart['FUOE_Untouched'], name='PI_PL_FUOE (Nepřebalováno)', mode='lines+markers', line=dict(color='#fdba74', dash='dash')))
         fig.add_trace(go.Scatter(x=df_chart['Month'], y=df_chart['Billed_O'], name='Fakturace: O/OE Vollpalette', mode='lines+markers', line=dict(color='#eab308', width=3)))
-        
+
         # Ideální & Ztracené
         fig.add_trace(go.Scatter(x=df_chart['Month'], y=df_chart['Ideal'], name='Ideální palety', mode='lines+markers', line=dict(color='#8b5cf6', width=2)))
         fig.add_trace(go.Scatter(x=df_chart['Month'], y=df_chart['Lost'], name='Ztracené palety', mode='lines+markers', line=dict(color='#ef4444', width=2)))
-        
+
         fig.update_layout(
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
@@ -256,33 +257,33 @@ def render_fu_compare(df_pick, billing_df, voll_set, queue_count_col):
 
     if sel_del:
         del_data = to_agg[to_agg['Delivery'] == sel_del].copy()
-        
+
         st.markdown(f"#### 📦 {_t('Úkoly ze skeneru (Pick Report)', 'Scanner Tasks (Pick Report)')}")
-        
+
         def get_status_text(row):
             if row['Is_FU_Any'] and row['Is_Untouched'] and row['Is_Voll_Billed']: return "🔵 Ideální (Skener i SAP)"
             if row['Is_FU_Any'] and not row['Is_Untouched'] and row['Is_Voll_Billed']: return "🟢 Zachráněno (Přelepeno)"
             if row['Is_FU_Any'] and not row['Is_Voll_Billed']: return "🔴 Ztraceno (Není Vollpalette)"
             if not row['Is_FU_Any'] and row['Is_Voll_Billed']: return "🟡 Bonus (Z běžného picku)"
             return "⚪ Běžný pick (Neúčtuje se jako paleta)"
-            
+
         del_data['Výsledek (Status)'] = del_data.apply(get_status_text, axis=1)
         disp_del = del_data[['Queue', 'Source_HU', 'Dest_HU', 'Material', 'Výsledek (Status)']].copy()
-        
+
         def color_status(val):
             if '🔵' in str(val): return 'color: #3b82f6; font-weight: bold'
             if '🟢' in str(val): return 'color: #10b981; font-weight: bold'
             if '🔴' in str(val): return 'color: #ef4444; font-weight: bold'
             if '🟡' in str(val): return 'color: #eab308; font-weight: bold'
             return 'color: gray'
-            
+
         try:
             styled_del = disp_del.style.map(color_status, subset=['Výsledek (Status)'])
         except AttributeError:
             styled_del = disp_del.style.applymap(color_status, subset=['Výsledek (Status)'])
-            
+
         st.dataframe(styled_del, width="stretch", hide_index=True)
-        
+
         df_hu_details = st.session_state.get('debug_hu_details')
         if df_hu_details is not None and not df_hu_details.empty:
             del_billed = df_hu_details[df_hu_details['Clean_Del'] == sel_del]

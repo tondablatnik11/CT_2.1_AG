@@ -9,9 +9,10 @@ Poskytuje:
 import functools
 import logging
 import traceback
+from typing import Any, Callable, Optional
+
 import pandas as pd
 import streamlit as st
-from typing import Callable, Any, Optional
 
 logger = logging.getLogger("warehouse.safety")
 
@@ -148,3 +149,70 @@ def safe_number_format(value, decimals: int = 0) -> str:
         return f"{float(value):,.{decimals}f}".replace(",", " ")
     except (ValueError, TypeError):
         return str(value)
+
+
+def safe_metric(label: str, value=None, **kwargs) -> None:
+    """
+    Bezpečný wrapper kolem st.metric - nikdy nevyhodí výjimku.
+
+    Pokud dojde k chybě (None hodnota, chybný formát, interní Streamlit chyba),
+    zobrazí se placeholder s vysvětlením místo pádu UI.
+
+    Příklad:
+        safe_metric("Celkem pohybů", len(df))
+        safe_metric("Průměr", df['qty'].mean(), delta="-5%")
+    """
+    try:
+        # Pokud je value None / NaN, nahradíme placeholderem, aby st.metric nepadal
+        if value is None:
+            try:
+                if pd.isna(value):
+                    value = "-"
+            except (TypeError, ValueError):
+                value = "-"
+        st.metric(label=label, value=value, **kwargs)
+    except Exception as e:
+        logger.exception(
+            f"safe_metric: chyba při vykreslení metriky '{label}'"
+        )
+        try:
+            st.warning(
+                f"⚠️ **Metrika `{label}`** se nepodařila zobrazit.\n\n"
+                f"`{type(e).__name__}`: {str(e)[:120]}"
+            )
+        except Exception:
+            pass
+
+
+def safe_plotly_chart(fig, **kwargs) -> None:
+    """
+    Bezpečný wrapper kolem st.plotly_chart - nikdy nevyhodí výjimku.
+
+    Při chybě (None fig, prázdná data, interní Streamlit/Plotly chyba) zobrazí
+    user-friendly fallback zprávu a zaloguje traceback.
+
+    Příklad:
+        safe_plotly_chart(fig, use_container_width=True)
+    """
+    if fig is None:
+        logger.warning("safe_plotly_chart: fig je None - nic nezobrazuji")
+        try:
+            st.info("ℹ️ Graf není k dispozici (prázdná data).")
+        except Exception:
+            pass
+        return
+
+    try:
+        st.plotly_chart(fig, **kwargs)
+    except Exception as e:
+        logger.exception(
+            f"safe_plotly_chart: chyba při vykreslení grafu "
+            f"({type(fig).__name__})"
+        )
+        try:
+            st.warning(
+                f"⚠️ **Graf se nepodařilo vykreslit.**\n\n"
+                f"`{type(e).__name__}`: {str(e)[:150]}"
+            )
+        except Exception:
+            pass

@@ -14,24 +14,35 @@ Architektura:
             ├── safe_render.py    - error handling
             └── tab_*.py          - jednotlivé záložky
 """
+import io
+import logging
 import os
 import re
-import io
 import time
-import logging
-from typing import Optional, Tuple, Any, Dict
-import streamlit as st
-import pandas as pd
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
+import pandas as pd
+import streamlit as st
 from streamlit_option_menu import option_menu
 
-from database import save_to_db, load_from_db, get_supabase_client, clear_cache
-from modules.utils import (
-    t, fast_compute_moves, get_match_key_vectorized, get_match_key,
-    parse_packing_time, BOX_UNITS, detect_vollpalettes, safe_hu, safe_del,
-    optimize_dataframe_dtypes, CHART_LAYOUT, CHART_COLORS
+from database import clear_cache, get_supabase_client, load_from_db, save_to_db
+from modules.diagnostics import (
+    get_system_health,
+    log_performance,
+    record_successful_load,
+    safe_execute,
 )
-from modules.safe_render import safe_render, ErrorBoundary, validate_dataframe
+from modules.safe_render import ErrorBoundary
+from modules.utils import (
+    BOX_UNITS,
+    detect_vollpalettes,
+    fast_compute_moves,
+    get_match_key,
+    get_match_key_vectorized,
+    safe_del,
+    t,
+)
 
 # ==========================================
 # LOGGING CONFIGURATION
@@ -231,18 +242,227 @@ footer {visibility: hidden;}
     border: 1px solid rgba(59, 130, 246, 0.3) !important;
 }
 
-/* === LOADING STATES - SKELETON === */
+/* === LOADING STATES - SKELETON (vylepšené) === */
 @keyframes skeleton-pulse {
     0%, 100% { opacity: 0.4; }
     50% { opacity: 0.8; }
 }
+@keyframes skeleton-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
 .skeleton {
     background: linear-gradient(90deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.15) 50%, rgba(255,255,255,0.05) 100%);
     background-size: 200% 100%;
-    animation: skeleton-pulse 1.5s ease-in-out infinite;
+    animation: skeleton-shimmer 1.8s ease-in-out infinite;
     border-radius: 8px;
     height: 24px;
     margin-bottom: 8px;
+}
+.skeleton-line {
+    background: linear-gradient(90deg, rgba(59,130,246,0.08) 0%, rgba(59,130,246,0.20) 50%, rgba(59,130,246,0.08) 100%);
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.8s ease-in-out infinite;
+    border-radius: 6px;
+    height: 14px;
+    margin-bottom: 8px;
+}
+.skeleton-card {
+    background: linear-gradient(135deg, rgba(30,41,59,0.45) 0%, rgba(30,41,59,0.65) 100%);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 12px;
+}
+.skeleton-card .skeleton-line { width: 80%; }
+.skeleton-card .skeleton-line:nth-child(2) { width: 50%; }
+.skeleton-card .skeleton-line:nth-child(3) { width: 65%; }
+
+/* === TABULKY - HOVER EFEKTY === */
+[data-testid="stDataFrame"] tbody tr {
+    transition: background-color 0.15s ease, transform 0.1s ease;
+}
+[data-testid="stDataFrame"] tbody tr:hover {
+    background-color: rgba(59, 130, 246, 0.08) !important;
+    cursor: default;
+}
+[data-testid="stDataFrame"] thead th {
+    background: rgba(30, 41, 59, 0.6) !important;
+    backdrop-filter: blur(8px);
+    font-weight: 700 !important;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    font-size: 11px !important;
+    color: #94a3b8 !important;
+    border-bottom: 2px solid rgba(59, 130, 246, 0.3) !important;
+}
+
+/* === PRINT STYLES - NOTICE BOARD (vysoký kontrast) === */
+@media print {
+    html, body, [class*="css"] {
+        background: #ffffff !important;
+        color: #000000 !important;
+        font-family: 'Helvetica Neue', Arial, sans-serif !important;
+    }
+    .stApp {
+        background: #ffffff !important;
+        background-image: none !important;
+    }
+    [data-testid="stSidebar"], [data-testid="stHeader"],
+    .stButton, .stDownloadButton, .stProgress,
+    header, footer, [data-testid="stToolbar"] {
+        display: none !important;
+    }
+    .main-header, .sub-header, .hero-metric h1, .hero-metric h2,
+    [data-testid="stMetricValue"], [data-testid="stMetricLabel"],
+    .section-header h3, .section-header p, h1, h2, h3, h4, p, span, div {
+        color: #000000 !important;
+        -webkit-text-fill-color: #000000 !important;
+        background: none !important;
+        text-shadow: none !important;
+    }
+    [data-testid="stMetric"] {
+        background: #f5f5f5 !important;
+        border: 1px solid #333333 !important;
+        backdrop-filter: none !important;
+        page-break-inside: avoid;
+        box-shadow: none !important;
+    }
+    .section-header {
+        background: #f0f0f0 !important;
+        border-left: 4px solid #000000 !important;
+        box-shadow: none !important;
+    }
+    [data-testid="stDataFrame"] {
+        border: 1px solid #000000 !important;
+        page-break-inside: avoid;
+    }
+    [data-testid="stDataFrame"] tbody tr:hover {
+        background-color: transparent !important;
+    }
+    .badge {
+        border: 1px solid #000000 !important;
+        color: #000000 !important;
+        background: #ffffff !important;
+    }
+    [data-baseweb="tab-list"], [data-baseweb="tab"] {
+        display: none !important;
+    }
+}
+
+/* === PŘÍSTUPNOST - REDUCED MOTION === */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+    [data-testid="stMetric"]:hover,
+    [data-baseweb="tab"]:hover {
+        transform: none !important;
+    }
+    .skeleton, .skeleton-line {
+        animation: none !important;
+        opacity: 0.6;
+    }
+}
+
+/* === PIPELINE STATUS INDICATOR === */
+.pipeline-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    transition: all 0.2s ease;
+}
+.pipeline-status-loading {
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    color: #fbbf24;
+}
+.pipeline-status-ok {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    color: #34d399;
+}
+.pipeline-status-error {
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #f87171;
+}
+.pipeline-status .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.pipeline-status-loading .status-dot {
+    background: #fbbf24;
+    animation: pulse-dot 1.4s ease-in-out infinite;
+}
+.pipeline-status-ok .status-dot { background: #34d399; }
+.pipeline-status-error .status-dot { background: #f87171; }
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.3); }
+}
+
+/* === APP BRANDING V SIDEBARU === */
+.app-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    margin-bottom: 8px;
+    background: linear-gradient(135deg, rgba(59,130,246,0.18) 0%, rgba(139,92,246,0.12) 100%);
+    border: 1px solid rgba(59,130,246,0.3);
+    border-radius: 12px;
+    backdrop-filter: blur(10px);
+}
+.app-brand-logo {
+    font-size: 28px;
+    line-height: 1;
+    filter: drop-shadow(0 0 8px rgba(59,130,246,0.5));
+}
+.app-brand-text { display: flex; flex-direction: column; }
+.app-brand-title {
+    font-size: 14px;
+    font-weight: 800;
+    color: #f8fafc;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+}
+.app-brand-subtitle {
+    font-size: 10px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 2px;
+}
+
+/* === QUICK STATS V SIDEBARU === */
+.sidebar-stat {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    margin-bottom: 4px;
+    background: rgba(30, 41, 59, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    font-size: 12px;
+}
+.sidebar-stat-label { color: #94a3b8; }
+.sidebar-stat-value {
+    color: #60a5fa;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
 }
 
 /* === SCROLLBAR === */
@@ -324,7 +544,24 @@ if 'lang' not in st.session_state:
     st.session_state.lang = 'cs'
 if 'app_initialized' not in st.session_state:
     st.session_state.app_initialized = True
+    st.session_state.app_started_at = time.time()
     logger.info("Aplikace inicializována")
+
+# === DIAGNOSTIKA - inicializace session_state klíčů ===
+# error_counter: dict s "total" + "recent" (rolling window timestampů)
+if 'error_counter' not in st.session_state:
+    st.session_state.error_counter = {
+        "total": 0,
+        "recent": [],
+        "recent_window_s": 60.0,
+        "warn_threshold": 5,
+    }
+# last_successful_load: ISO timestamp posledního úspěšného loadu (None = dosud nic)
+if 'last_successful_load' not in st.session_state:
+    st.session_state.last_successful_load = None
+# last_warning_ts: kdy se naposledy zobrazilo varování (throttling, ne spamovat)
+if 'diag_last_warning_ts' not in st.session_state:
+    st.session_state.diag_last_warning_ts = 0.0
 
 
 def _t(cs: str, en: str) -> str:
@@ -713,10 +950,18 @@ def fetch_and_prep_data(use_marm: bool = True) -> Optional[Dict[str, Any]]:
 
 
 def _vectorize_packing_times(series: pd.Series) -> pd.Series:
-    """Vektorová verze parse_packing_time - 50x rychlejší než apply."""
+    """Vektorová verze parse_packing_time - 50x rychlejší než apply.
+
+    Podporuje formáty:
+    - Decimal minuty ("5.5", "123.4")
+    - Decimal hodiny < 1 ("0.5" = 30 min, převede se na 720 min)
+    - Celé minuty ("30", "120")
+    - HH:MM:SS ("01:30:00" = 90 min)
+    - HH:MM ("01:30" = 90 min)
+    """
     s = series.astype(str).str.strip()
 
-    # Prázdné hodnoty
+    # Prázdné hodnoty -> 0 minut
     result = np.zeros(len(s), dtype=np.float32)
     valid_mask = ~s.isin(['', 'nan', 'None', 'NaN'])
     if not valid_mask.any():
@@ -724,22 +969,32 @@ def _vectorize_packing_times(series: pd.Series) -> pd.Series:
 
     valid = s[valid_mask]
 
-    # Pokus o float konverzi (většina případů)
+    # 1. Pokus o float konverzi (většina případů)
     try:
         nums = pd.to_numeric(valid, errors='coerce')
         float_mask = nums.notna()
-        # Čísla < 1 = hodiny v desetinné soustavě, převést na minuty
-        result[valid_mask & float_mask] = np.where(
-            nums[float_mask] < 1.0,
-            nums[float_mask] * 24 * 60,
-            nums[float_mask]
-        ).astype('float32')
+        if float_mask.any():
+            # Čísla < 1 = hodiny v desetinné soustavě, převést na minuty
+            vals = nums[float_mask].values
+            converted = np.where(vals < 1.0, vals * 24 * 60, vals).astype(np.float32)
+            # DŮLEŽITÉ: valid_mask a float_mask mají různé indexy (float_mask je z 'valid', ne z 's').
+            # Musíme namapovat výsledky zpět na pozice v 's'. Indexy v 'nums' odpovídají
+            # indexům v 'valid', které odpovídají indexům v 's' kde valid_mask=True.
+            valid_idx = np.where(valid_mask.values)[0]
+            float_idx_in_valid = np.where(float_mask.values)[0]
+            for out_pos, in_pos in zip(valid_idx[float_idx_in_valid], range(len(float_idx_in_valid))):
+                result[out_pos] = converted[in_pos]
     except Exception:
-        pass
+        nums = pd.Series([], dtype='float64')
+        float_mask = pd.Series([], dtype=bool)
 
-    # Zpracování formátu HH:MM:SS nebo HH:MM pro zbývající
-    str_mask = valid_mask & ~pd.Series(nums, index=valid.index).notna() if False else None
-    remaining = valid[~pd.to_numeric(valid, errors='coerce').notna()]
+    # 2. Zpracování formátu HH:MM:SS nebo HH:MM pro zbývající (non-numeric)
+    if len(nums) > 0:
+        already_numeric = nums.notna()
+        remaining = valid[~already_numeric.values]
+    else:
+        remaining = valid
+
     if len(remaining) > 0:
         for idx, val in remaining.items():
             try:
@@ -747,7 +1002,9 @@ def _vectorize_packing_times(series: pd.Series) -> pd.Series:
                 if len(parts) == 3:
                     result[idx] = int(parts[0]) * 60 + int(parts[1]) + float(parts[2]) / 60.0
                 elif len(parts) == 2:
-                    result[idx] = int(parts[0]) + float(parts[1]) / 60.0
+                    # POZOR: HH:MM formát - parts[0] jsou HODINY, parts[1] jsou MINUTY
+                    # ne zlomek hodiny! Proto int(parts[0]) + parts[1]/60 je ŠPATNĚ.
+                    result[idx] = int(parts[0]) * 60 + int(parts[1])
             except (ValueError, IndexError):
                 pass
 
@@ -760,7 +1017,7 @@ def _vectorize_packing_times(series: pd.Series) -> pd.Series:
 
 def main():
     """Hlavní vstupní bod aplikace."""
-    # Hlavička s přepínačem jazyka
+    # Hlavička s přepínačem jazyka, stavem pipeline a rychlým refresh
     col_title, col_lang = st.columns([8, 1])
     with col_title:
         st.markdown(f"<div class='main-header'>{t('title')}</div>", unsafe_allow_html=True)
@@ -771,28 +1028,62 @@ def main():
             logger.info(f"Jazyk přepnut na: {st.session_state.lang}")
             st.rerun()
 
+    # Inicializace session state pro pipeline status + datum/čas
+    if 'pipeline_status' not in st.session_state:
+        st.session_state.pipeline_status = 'idle'  # idle | loading | ok | error
+    if 'pipeline_start_ts' not in st.session_state:
+        st.session_state.pipeline_start_ts = None
+
+    # === HLAVIČKA: DATUM/ČAS + STATUS + REFRESH ===
+    _render_app_header_bar()
+
     # Sidebar - menu + konfigurace
     selected_page = _render_sidebar()
 
     # === HLAVNÍ DATOVÝ PIPELINE ===
-    progress_bar = st.progress(0, text="🚀 Spouštím Warehouse Control Tower...")
+    pipeline_steps = [
+        (10, "🚀 Spouštím Warehouse Control Tower...", "Inicializace", "~1s"),
+        (20, "📥 Načítám konfiguraci algoritmů...", "Konfigurace", "<1s"),
+        (40, "📦 Načítám data ze Supabase (raw_pick)...", "raw_pick", "~3-5s"),
+        (55, "📦 Načítám data ze Supabase (MARM master)...", "raw_marm", "~2-4s"),
+        (70, "📦 Načítám data ze Supabase (OE-Times, CATS)...", "raw_oe / raw_cats", "~2-3s"),
+        (82, "⚙️ Počítám fyzické pohyby skladníků...", "Výpočet pohybů", "~1-2s"),
+        (95, "📊 Vykresluji dashboard...", "Render UI", "~1s"),
+        (100, "✅ Hotovo!", "Dokončeno", "0s"),
+    ]
+    progress_bar = st.progress(0, text=pipeline_steps[0][1])
+
+    def _advance(idx: int, table_hint: str = ""):
+        pct, text, step_name, eta = pipeline_steps[idx]
+        suffix = f" — {table_hint}" if table_hint else ""
+        progress_bar.progress(pct, text=f"{text}{suffix}")
+
+    st.session_state.pipeline_status = 'loading'
+    st.session_state.pipeline_start_ts = time.time()
+    pipeline_error: Optional[Exception] = None
+    pipeline_start_time = time.time()
+
     try:
-        progress_bar.progress(15, text="📥 Načítám konfiguraci algoritmů...")
+        _advance(1)
         use_marm = st.session_state.get('use_marm', True)
 
-        progress_bar.progress(35, text="📦 Načítám a propojuji data ze Supabase...")
+        _advance(2, table_hint="raw_pick")
         data_dict = fetch_and_prep_data(use_marm)
 
         if data_dict is None:
             progress_bar.empty()
+            st.session_state.pipeline_status = 'error'
             _render_empty_database_warning()
             return
 
-        progress_bar.progress(65, text="⚙️ Počítám fyzické pohyby skladníků...")
+        _advance(3, table_hint="raw_marm")
+
         # .copy() — data_dict['df_pick'] pochází z @st.cache_data (sdílený objekt).
         # _compute_movements_safe přidává sloupce in-place; bez kopie by mutace
         # prosákla do cache a mezi taby/sessiony (viz performance rules).
         df_pick = data_dict['df_pick'].copy()
+
+        _advance(4, table_hint="raw_oe / raw_cats")
 
         # === FILTROVÁNÍ PODLE STRÁNKY ===
         if selected_page in (_t("Sklad (Storage)", "Storage"), _t("Admins", "Admins")):
@@ -803,6 +1094,7 @@ def main():
 
         if df_pick.empty:
             progress_bar.empty()
+            st.session_state.pipeline_status = 'error'
             st.warning(_t("⚠️ Po vyloučení těchto materiálů nezbyla žádná data.", "⚠️ No data left after excluding these materials."))
             st.stop()
 
@@ -811,12 +1103,29 @@ def main():
         st.session_state['data_dict'] = data_dict
 
         # === VÝPOČET POHYBŮ (cacheovaný - závisí na filtrech) ===
-        progress_bar.progress(80, text="⚙️ Aplikuji výpočet fyzických pohybů...")
+        _advance(5, table_hint=f"df_pick · {len(df_pick):,} řádků")
         _compute_movements_safe(df_pick, data_dict)
 
-        progress_bar.progress(95, text="📊 Vykresluji dashboard...")
+        _advance(6)
         time.sleep(0.1)
+        _advance(7)
+        time.sleep(0.05)
         progress_bar.empty()
+        st.session_state.pipeline_status = 'ok'
+
+        # === DIAGNOSTIKA: záznam úspěšného loadu + výkonu pipeline ===
+        pipeline_elapsed = time.time() - pipeline_start_time
+        try:
+            record_successful_load()
+            log_performance("main_pipeline", pipeline_elapsed)
+        except Exception as diag_e:
+            logger.debug(f"Diagnostika po úspěšném loadu selhala: {diag_e}")
+
+        # Aktualizace sidebar quick stats po úspěšném loadu
+        st.session_state['sidebar_stats'] = {
+            'rows': f"{len(df_pick):,}",
+            'last_update': time.strftime('%H:%M:%S'),
+        }
 
         # === ROZBALENÍ PODLE STRÁNKY ===
         _route_to_page(selected_page, df_pick, data_dict)
@@ -829,7 +1138,26 @@ def main():
         _render_footer(df_pick, data_dict)
 
     except Exception as e:
+        pipeline_error = e
         progress_bar.empty()
+        st.session_state.pipeline_status = 'error'
+
+        # === DIAGNOSTIKA: záznam chyby do error_counter (rolling window) ===
+        try:
+            err_counter = st.session_state.get('error_counter')
+            if not isinstance(err_counter, dict):
+                err_counter = {"total": 0, "recent": [], "recent_window_s": 60.0, "warn_threshold": 5}
+                st.session_state.error_counter = err_counter
+            now_ts = time.time()
+            window_s = float(err_counter.get('recent_window_s', 60.0))
+            cutoff = now_ts - window_s
+            recent = [t for t in err_counter.get('recent', []) if isinstance(t, (int, float)) and t >= cutoff]
+            recent.append(now_ts)
+            err_counter['recent'] = recent
+            err_counter['total'] = int(err_counter.get('total', 0)) + 1
+        except Exception as diag_e:
+            logger.debug(f"Záznam chyby do error_counter selhal: {diag_e}")
+
         logger.exception("Kritická chyba v main()")
         st.error(
             f"🚨 **Kritická chyba aplikace:** `{type(e).__name__}`\n\n"
@@ -837,12 +1165,106 @@ def main():
             "Obnovte stránku (F5) nebo kontaktujte správce."
         )
         with st.expander("🔧 Technické detaily"):
+            import traceback
             st.code(traceback.format_exc(), language="python")
+
+        # === DIAGNOSTIKA: varování při > 5 chybách za minutu (s throttlingem) ===
+        try:
+            err_counter = st.session_state.get('error_counter', {})
+            warn_threshold = int(err_counter.get('warn_threshold', 5))
+            recent_count = len(err_counter.get('recent', []))
+            now_ts = time.time()
+            last_warn_ts = float(st.session_state.get('diag_last_warning_ts', 0.0))
+            # Throttling: ne častěji než 1× za 30s
+            if recent_count > warn_threshold and (now_ts - last_warn_ts) > 30.0:
+                st.session_state.diag_last_warning_ts = now_ts
+                health = safe_execute(get_system_health, fallback={}, operation_name="get_system_health")
+                mem_mb = health.get('memory_mb') if isinstance(health, dict) else None
+                mem_text = f", paměť: {mem_mb:.1f} MB" if isinstance(mem_mb, (int, float)) else ""
+                st.warning(
+                    f"🚧 **Vysoká chybovost detekována**: "
+                    f"{recent_count} chyb za posledních "
+                    f"{err_counter.get('recent_window_s', 60.0):.0f}s"
+                    f"{mem_text}.\n\n"
+                    f"Aplikace může být nestabilní. Zvažte obnovení stránky (F5)."
+                )
+                logger.warning(
+                    f"Vysoká chybovost: {recent_count} chyb za "
+                    f"{err_counter.get('recent_window_s', 60.0):.0f}s "
+                    f"(práh: {warn_threshold})"
+                )
+        except Exception as warn_e:
+            logger.debug(f"Varování o vysoké chybovosti selhalo: {warn_e}")
+
+    finally:
+        # Překreslíme header bar s finálním stavem pipeline
+        _render_app_header_bar(status_override=st.session_state.pipeline_status)
+
+
+def _render_app_header_bar(status_override: Optional[str] = None):
+    """Vylepšená hlavička: datum/čas, indikátor stavu pipeline, rychlý refresh."""
+    status = status_override or st.session_state.get('pipeline_status', 'idle')
+    elapsed = ""
+    if st.session_state.get('pipeline_start_ts') and status in ('ok', 'error'):
+        elapsed_s = time.time() - st.session_state.pipeline_start_ts
+        elapsed = f" · {elapsed_s:.1f}s"
+
+    status_map = {
+        'idle':    ('pipeline-status', '⏸ Připraveno'),
+        'loading': ('pipeline-status-loading', '⟳ Načítám data'),
+        'ok':      ('pipeline-status-ok', f'✓ OK{elapsed}'),
+        'error':   ('pipeline-status-error', '✗ Chyba'),
+    }
+    css_class, label = status_map.get(status, status_map['idle'])
+
+    now = time.strftime('%A %d.%m.%Y · %H:%M:%S')
+    # Přeložíme název dne do češtiny (základní mapování)
+    day_cz = {
+        'Monday': 'Pondělí', 'Tuesday': 'Úterý', 'Wednesday': 'Středa',
+        'Thursday': 'Čtvrtek', 'Friday': 'Pátek', 'Saturday': 'Sobota', 'Sunday': 'Neděle',
+    }
+    if st.session_state.get('lang', 'cs') == 'cs':
+        for en, cz in day_cz.items():
+            now = now.replace(en, cz)
+
+    col_dt, col_status, col_refresh = st.columns([3, 2, 1])
+    with col_dt:
+        st.markdown(
+            f"<div style='font-size:13px; color:#94a3b8; padding-top:6px;'>"
+            f"📅 <strong style='color:#cbd5e1;'>{now}</strong></div>",
+            unsafe_allow_html=True,
+        )
+    with col_status:
+        st.markdown(
+            f"<div style='text-align:right; padding-top:4px;'>"
+            f"<span class='pipeline-status {css_class}'>"
+            f"<span class='status-dot'></span>{label}</span></div>",
+            unsafe_allow_html=True,
+        )
+    with col_refresh:
+        if st.button(
+            _t("🔄 Obnovit", "🔄 Refresh"),
+            width="stretch",
+            key="quick_refresh",
+            help=_t("Vyčistí cache a znovu načte data ze Supabase.", "Clear cache and reload data from Supabase."),
+        ):
+            clear_cache()
+            st.session_state.pipeline_status = 'idle'
+            logger.info("Rychlý refresh: cache vyčištěna")
+            st.rerun()
 
 
 def _render_sidebar() -> str:
     """Sidebar s navigací a konfigurací algoritmů."""
     with st.sidebar:
+        # === APP BRANDING ===
+        _render_app_brand()
+
+        # === RYCHLÉ STATISTIKY ===
+        _render_sidebar_quick_stats()
+
+        st.divider()
+
         st.markdown("### 🎛️ Navigace")
 
         selected = option_menu(
@@ -878,46 +1300,47 @@ def _render_sidebar() -> str:
 
         st.divider()
 
-        st.markdown("### ⚙️ Konfigurace algoritmů")
-        use_marm = st.toggle(
-            _t("📦 Zahrnout data z MARM", "📦 Include MARM data"),
-            value=True,
-            help=_t("Vypnutím zjistíte, kolik dat je aplikace schopna spočítat přesně pouze pomocí vašeho ručního ověření.",
-                    "By turning this off, you'll see how much data the app can calculate accurately using only your manual verification.")
-        )
-        st.session_state['use_marm'] = use_marm
+        # === COLLAPSE: KONFIGURACE ALGORITMŮ ===
+        with st.expander(_t("⚙️ Konfigurace algoritmů", "⚙️ Algorithm Configuration"), expanded=False):
+            use_marm = st.toggle(
+                _t("📦 Zahrnout data z MARM", "📦 Include MARM data"),
+                value=True,
+                help=_t("Vypnutím zjistíte, kolik dat je aplikace schopna spočítat přesně pouze pomocí vašeho ručního ověření.",
+                        "By turning this off, you'll see how much data the app can calculate accurately using only your manual verification.")
+            )
+            st.session_state['use_marm'] = use_marm
 
-        limit_vahy = st.number_input(
-            _t("Hranice váhy (kg)", "Weight limit (kg)"),
-            min_value=0.1, max_value=20.0, value=2.0, step=0.5,
-            help=_t("Těžší kus než limit = 1 samostatný pohyb", "Heavier piece than limit = 1 separate move")
-        )
-        limit_rozmeru = st.number_input(
-            _t("Hranice rozměru (cm)", "Dimension limit (cm)"),
-            min_value=1.0, max_value=200.0, value=15.0, step=1.0,
-            help=_t("Větší kus než limit = 1 samostatný pohyb", "Larger piece than limit = 1 separate move")
-        )
-        kusy_na_hmat = st.slider(
-            _t("Ks do hrsti", "Pcs per grab"),
-            min_value=1, max_value=20, value=1, step=1,
-            help=_t("Maximální počet lehkých kusů, které skladník vezme najednou",
-                    "Max number of light pieces picked at once")
-        )
+            limit_vahy = st.number_input(
+                _t("Hranice váhy (kg)", "Weight limit (kg)"),
+                min_value=0.1, max_value=20.0, value=2.0, step=0.5,
+                help=_t("Těžší kus než limit = 1 samostatný pohyb", "Heavier piece than limit = 1 separate move")
+            )
+            limit_rozmeru = st.number_input(
+                _t("Hranice rozměru (cm)", "Dimension limit (cm)"),
+                min_value=1.0, max_value=200.0, value=15.0, step=1.0,
+                help=_t("Větší kus než limit = 1 samostatný pohyb", "Larger piece than limit = 1 separate move")
+            )
+            kusy_na_hmat = st.slider(
+                _t("Ks do hrsti", "Pcs per grab"),
+                min_value=1, max_value=20, value=1, step=1,
+                help=_t("Maximální počet lehkých kusů, které skladník vezme najednou",
+                        "Max number of light pieces picked at once")
+            )
 
-        st.session_state['algorithm_limits'] = {
-            'vaha': limit_vahy, 'rozmer': limit_rozmeru, 'hrst': kusy_na_hmat
-        }
+            st.session_state['algorithm_limits'] = {
+                'vaha': limit_vahy, 'rozmer': limit_rozmeru, 'hrst': kusy_na_hmat
+            }
 
-        st.divider()
-        st.markdown("### 🚫 Vyloučení dat")
-        exclude_mats_input = st.text_area(
-            _t("Vyloučit materiály (oddělené čárkou/mezerou):", "Exclude materials (comma/space separated):"),
-            help=_t("Vložené materiály budou kompletně smazány z výpočtů.", "Entered materials will be completely removed from calculations.")
-        )
-        excluded_materials = []
-        if exclude_mats_input:
-            excluded_materials = [m.strip().upper() for m in re.split(r'[,\s;]+', exclude_mats_input) if m.strip()]
-        st.session_state['excluded_materials'] = excluded_materials
+        # === COLLAPSE: VYLOUČENÍ DAT ===
+        with st.expander(_t("🚫 Vyloučení dat", "🚫 Data Exclusion"), expanded=False):
+            exclude_mats_input = st.text_area(
+                _t("Vyloučit materiály (oddělené čárkou/mezerou):", "Exclude materials (comma/space separated):"),
+                help=_t("Vložené materiály budou kompletně smazány z výpočtů.", "Entered materials will be completely removed from calculations.")
+            )
+            excluded_materials = []
+            if exclude_mats_input:
+                excluded_materials = [m.strip().upper() for m in re.split(r'[,\s;]+', exclude_mats_input) if m.strip()]
+            st.session_state['excluded_materials'] = excluded_materials
 
         # Status indicator - Supabase připojení
         st.divider()
@@ -930,16 +1353,52 @@ def _render_sidebar() -> str:
         return selected
 
 
+def _render_app_brand():
+    """Logo a branding aplikace v horní části sidebaru."""
+    st.markdown(
+        """
+        <div class="app-brand">
+            <div class="app-brand-logo">🏢</div>
+            <div class="app-brand-text">
+                <div class="app-brand-title">Warehouse CT</div>
+                <div class="app-brand-subtitle">Control Tower · v2.1</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_sidebar_quick_stats():
+    """Rychlé statistiky v sidebaru (počet řádků, datum posledního update)."""
+    stats = st.session_state.get('sidebar_stats', {})
+    rows = stats.get('rows', '—')
+    last_update = stats.get('last_update', '—')
+
+    st.markdown(
+        f"""
+        <div class="sidebar-stat">
+            <span class="sidebar-stat-label">📊 Řádků v DB</span>
+            <span class="sidebar-stat-value">{rows}</span>
+        </div>
+        <div class="sidebar-stat">
+            <span class="sidebar-stat-label">🕒 Posl. update</span>
+            <span class="sidebar-stat-value">{last_update}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_connection_status():
     """Zobrazí status připojení k Supabase v sidebaru."""
-    from database import get_supabase_client
     client = get_supabase_client()
     if client:
         st.markdown(
             '<div style="text-align:center; padding:8px; background:rgba(16,185,129,0.1); '
             'border:1px solid rgba(16,185,129,0.3); border-radius:8px;">'
             '<span style="color:#34d399;">●</span> '
-            f'<span style="font-size:12px; color:#94a3b8;">Supabase: Connected</span></div>',
+            '<span style="font-size:12px; color:#94a3b8;">Supabase: Connected</span></div>',
             unsafe_allow_html=True
         )
     else:
@@ -947,7 +1406,7 @@ def _render_connection_status():
             '<div style="text-align:center; padding:8px; background:rgba(239,68,68,0.1); '
             'border:1px solid rgba(239,68,68,0.3); border-radius:8px;">'
             '<span style="color:#f87171;">●</span> '
-            f'<span style="font-size:12px; color:#94a3b8;">Supabase: Disconnected</span></div>',
+            '<span style="font-size:12px; color:#94a3b8;">Supabase: Disconnected</span></div>',
             unsafe_allow_html=True
         )
 

@@ -1,9 +1,9 @@
-import streamlit as st
-import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from modules.utils import t
-from modules.safe_render import ErrorBoundary, validate_dataframe, safe_render
+import streamlit as st
+
+from modules.safe_render import safe_render
+
 
 @safe_render(fallback_message="⚠️ Chyba při vykreslování Paletových zakázek")
 def render_pallets(df_pick):
@@ -12,10 +12,10 @@ def render_pallets(df_pick):
         return en if st.session_state.get('lang', 'cs') == 'en' else cs
 
     st.markdown(f"<div class='section-header'><h3>🎯 {_t('Analýza čistých palet (Single SKU)', 'Pure Pallets Analysis (Single SKU)')}</h3><p>{_t('Přehled paletových zakázek z front PI_PL a PI_PL_OE, které obsahují pouze jeden druh materiálu.', 'Overview of pallet orders from PI_PL and PI_PL_OE queues containing exactly one type of material.')}</p></div>", unsafe_allow_html=True)
-    
+
     # 1. Vyfiltrujeme pouze paletové fronty
     pal_df = df_pick[df_pick['Queue'].astype(str).str.upper().isin(['PI_PL', 'PI_PL_OE'])].copy()
-    
+
     if pal_df.empty:
         st.info(_t("V aktuálních datech nejsou žádné zakázky z front PI_PL nebo PI_PL_OE.", "No orders from PI_PL or PI_PL_OE queues found in current data."))
         return
@@ -41,7 +41,7 @@ def render_pallets(df_pick):
     total_single = len(single_df)
     avg_qty = single_df['total_qty'].mean()
     avg_moves = single_df['celkem_pohybu'].mean()
-    
+
     c1, c2, c3 = st.columns(3)
     with c1:
         with st.container(border=True): 
@@ -61,7 +61,7 @@ def render_pallets(df_pick):
     with col_t:
         st.markdown(f"**{_t('Detailní přehled (Nejnáročnější čisté palety)', 'Detailed Overview (Most demanding pure pallets)')}**")
         single_df['prum_poh_lok'] = np.where(single_df['lokace'] > 0, single_df['celkem_pohybu'] / single_df['lokace'], 0)
-        
+
         # Seřadíme od největšího počtu pohybů
         disp_single = single_df[['Delivery', 'total_qty', 'celkem_pohybu', 'prum_poh_lok', 'vaha_zakazky']].sort_values('celkem_pohybu', ascending=False).head(50)
         disp_single.columns = [
@@ -71,7 +71,7 @@ def render_pallets(df_pick):
             _t("Pohybů / lokaci", "Moves / Loc"), 
             _t("Celk. váha (kg)", "Total Weight (kg)")
         ]
-        
+
         st.dataframe(disp_single.style.format({
             _t("Pohybů / lokaci", "Moves / Loc"): "{:.1f}", 
             _t("Celk. váha (kg)", "Total Weight (kg)"): "{:.1f}"
@@ -85,9 +85,9 @@ def render_pallets(df_pick):
                 pocet_zakazek=('Delivery', 'count'),
                 prum_pohybu=('celkem_pohybu', 'mean')
             ).reset_index()
-            
+
             fig = go.Figure()
-            
+
             # Sloupce (Počet zakázek v daném měsíci)
             fig.add_trace(go.Bar(
                 x=trend_agg['Month'], 
@@ -98,7 +98,7 @@ def render_pallets(df_pick):
                 textposition='auto',
                 yaxis='y'
             ))
-            
+
             # Čára (Vývoj průměrného počtu fyzických pohybů)
             fig.add_trace(go.Scatter(
                 x=trend_agg['Month'], 
@@ -111,7 +111,7 @@ def render_pallets(df_pick):
                 line=dict(width=3), 
                 yaxis='y2'
             ))
-            
+
             fig.update_layout(
                 yaxis=dict(title=_t("Počet zakázek (1 mat.)", "Orders Count (1 mat.)")),
                 yaxis2=dict(title=_t("Průměr pohybů", "Avg Moves"), side="right", overlaying="y", showgrid=False),
@@ -120,7 +120,7 @@ def render_pallets(df_pick):
                 margin=dict(l=0, r=0, t=30, b=0),
                 legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0)
             )
-            
+
             st.plotly_chart(fig, width="stretch")
         else:
             st.info(_t("Chybí data o měsících pro vykreslení trendu.", "Missing month data to plot trend."))
