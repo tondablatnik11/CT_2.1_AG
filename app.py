@@ -533,6 +533,57 @@ footer {visibility: hidden;}
 [data-baseweb="notification"] {
     border-radius: 12px;
 }
+
+/* === MOBILE RESPONSIVE (P1 UX oprava) ===
+   Na mobilech/tabletech (≤ 768px) zmenšíme hlavičku, schováme méně důležité
+   texty, a zabráníme horizontálnímu overflowu. Bez tohoto bloku se aplikace
+   na 360px telefonu v podstatě nedá používat (sidebar přes celou šířku,
+   42px nadpis overflowuje). */
+@media (max-width: 768px) {
+    .main-header {
+        font-size: 26px !important;
+        letter-spacing: -0.01em;
+    }
+    .sub-header {
+        font-size: 13px !important;
+    }
+    .stApp {
+        overflow-x: hidden;
+    }
+    /* Sidebar se na mobilech chová jako overlay; výchozí Streamlit chování
+       je rozumné, ale přidáme větší touch target. */
+    [data-testid="stSidebar"] {
+        min-width: 260px !important;
+    }
+    /* Tabulky - umožníme horizontální scroll uvnitř. */
+    [data-testid="stDataFrame"] {
+        overflow-x: auto;
+    }
+    /* Pipeline status pill - menší text, aby se vešel. */
+    .pipeline-status {
+        font-size: 11px !important;
+        padding: 4px 10px !important;
+    }
+    /* App brand - skryjeme podnadpis pro úsporu místa. */
+    .app-brand-subtitle {
+        display: none !important;
+    }
+}
+
+/* === HIGH CONTRAST (P1 WCAG) ===
+   Pro uživatele s preferencí vyššího kontrastu. */
+@media (prefers-contrast: more) {
+    .stApp {
+        background-color: #000000;
+    }
+    [data-testid="stMetricLabel"] {
+        color: #ffffff !important;
+        opacity: 1 !important;
+    }
+    .section-header h3 {
+        color: #ffffff !important;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -866,14 +917,30 @@ def _load_pick_enriched(use_marm: bool) -> Optional[pd.DataFrame]:
     if 'Date' in df_pick.columns and 'Month' not in df_pick.columns:
         try:
             df_pick['Month'] = df_pick['Date'].dt.to_period('M').astype(str).replace('NaT', 'Neznámé')
+            # P2 výkonnostní oprava: Month je těžce groupovaný sloupec ve
+            # všech záložkách (Dashboard, Monthly KPI, FU Compare, Billing).
+            # category dtype = ~10x menší RAM + rychlejší groupby.
+            try:
+                df_pick['Month'] = df_pick['Month'].astype('category')
+            except (TypeError, ValueError):
+                pass
         except Exception as e:
             logger.warning(f"Nelze vytvořit Month sloupec: {e}")
             df_pick['Month'] = 'Neznámé'
 
-    # Clean_Del
+    # Clean_Del (P1 výkonnostní oprava: vektorizovaná safe_del místo apply).
     if 'Clean_Del' not in df_pick.columns and 'Delivery' in df_pick.columns:
         try:
-            df_pick['Clean_Del'] = df_pick['Delivery'].apply(safe_del)
+            # safe_del logika: strip → odstranění koncového ".0" (pouze pokud
+            # je zbytek čistě číselný) → odstranění levých nul ("" -> "0").
+            # Vectorized přes Series.str metody = ~10x rychlejší než apply.
+            s = df_pick['Delivery'].astype(str).str.strip()
+            has_dot_zero = s.str.endswith('.0')
+            without_dot = s.where(~has_dot_zero, s.str[:-2])
+            is_pure_numeric = without_dot.str.fullmatch(r'\d+', na=False).fillna(False)
+            cleaned = s.where(~has_dot_zero, without_dot.where(is_pure_numeric, s))
+            no_left_zeros = cleaned.str.lstrip('0')
+            df_pick['Clean_Del'] = no_left_zeros.where(no_left_zeros != '', '0')
         except Exception as e:
             logger.warning(f"Nelze vytvořit Clean_Del: {e}")
 
@@ -1107,9 +1174,12 @@ def main():
         _compute_movements_safe(df_pick, data_dict)
 
         _advance(6)
-        time.sleep(0.1)
+        # Kroky 6 a 7 jsou dříve obsahovaly time.sleep(0.1) / time.sleep(0.05)
+        # jako "falešný progress" - odstraněno, protože:
+        # 1) prodlužovalo úspěšné rendery o 150 ms zbytečně,
+        # 2) vizuálně klamalo uživatele - progress "📊 Vykresluji dashboard..."
+        #    se zobrazil na stejnou dobu bez ohledu na rychlost Supabase.
         _advance(7)
-        time.sleep(0.05)
         progress_bar.empty()
         st.session_state.pipeline_status = 'ok'
 
@@ -1159,14 +1229,65 @@ def main():
             logger.debug(f"Záznam chyby do error_counter selhal: {diag_e}")
 
         logger.exception("Kritická chyba v main()")
-        st.error(
-            f"🚨 **Kritická chyba aplikace:** `{type(e).__name__}`\n\n"
-            f"**Detail:** {str(e)[:300]}\n\n"
-            "Obnovte stránku (F5) nebo kontaktujte správce."
-        )
-        with st.expander("🔧 Technické detaily"):
-            import traceback
-            st.code(traceback.format_exc(), language="python")
+
+        # Rozlišení kategorie výjimky pro lepší triage (P2 UX improvement).
+        # Síťové/timeout chyby: varování + doporučení obnovit, ne panika.
+        # Datové/schema chyby: error, kontaktujte správce.
+        # Ostatní: generická chyba.
+        import traceback
+        tb_str = traceback.format_exc()
+        exc_type = type(e).__name__
+        is_network = exc_type in ("ConnectionError", "TimeoutError", "ReadTimeout", "SSLError", "HTTPError")
+        is_schema = exc_type in ("KeyError", "ValueError", "TypeError", "AttributeError")
+
+        if is_network:
+            st.warning(
+                f"⚠️ **Dočasná chyba připojení:** `{exc_type}`\n\n"
+                f"**Detail:** {str(e)[:200]}\n\n"
+                "Data se nepodařilo načíst ze Supabase. Zkuste obnovit stránku (F5) "
+                "nebo kliknout na tlačítko 🔄 Obnovit v hlavičce."
+            )
+        elif is_schema:
+            st.error(
+                f"🔧 **Problém se strukturou dat:** `{exc_type}`\n\n"
+                f"**Detail:** {str(e)[:200]}\n\n"
+                "Nahrané soubory mají neočekávanou strukturu. Ověřte v Admin Zóně, "
+                "že máte aktuální SAP exporty."
+            )
+        else:
+            st.error(
+                f"🚨 **Kritická chyba aplikace:** `{exc_type}`\n\n"
+                f"**Detail:** {str(e)[:300]}\n\n"
+                "Obnovte stránku (F5) nebo kontaktujte správce."
+            )
+
+        with st.expander("🔧 Technické detaily (pro vývojáře)"):
+            st.code(tb_str, language="python")
+
+        # Tlačítko pro pokračování: reset pipeline status + rerun.
+        # Uživatel může přepnout na jinou záložku, aniž by musel F5.
+        col_recover1, col_recover2, col_recover3 = st.columns([1, 1, 2])
+        with col_recover1:
+            if st.button("🔁 Zkusit znovu načíst", type="primary", key="recover_reload"):
+                try:
+                    clear_cache()
+                except Exception:
+                    pass
+                st.session_state.pipeline_status = 'idle'
+                st.session_state['_header_last_status'] = None
+                st.rerun()
+        with col_recover2:
+            if st.button("🧹 Vyčistit cache", key="recover_clear_cache"):
+                try:
+                    clear_cache()
+                    st.success("Cache vyčištěna. Obnovte stránku (F5).")
+                except Exception as clear_e:
+                    st.error(f"Čištění cache selhalo: {clear_e}")
+        with col_recover3:
+            st.caption(
+                "💡 Pokud chyba přetrvává, zkuste přepnout na jinou záložku "
+                "v sidebaru nebo obnovit stránku (F5)."
+            )
 
         # === DIAGNOSTIKA: varování při > 5 chybách za minutu (s throttlingem) ===
         try:

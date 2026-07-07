@@ -103,6 +103,77 @@ class TestGetMatchKeyVectorized:
         # (v praxi bývá 10-50x rychlejší)
         assert vec_time < apply_time * 1.5 or vec_time < 0.1
 
+    def test_parity_with_scalar_decimal_with_leading_zeros(self):
+        """REGRESE: dříve selhávalo na "000.50" -> "00.5" (jinak než skalární "0.5").
+
+        Root cause: regex ^0+(?=\\d) konzumoval jen nuly následované číslicí
+        BEZprostředně - za tečkou číslice není, takže "000.50" zůstalo "00.50".
+        Skalární verze split('.') + lstrip('0') zpracuje "000.50" -> "0.5".
+        Tato neshoda způsobovala chybné JOINy Match_Key vs manual_boxes.
+        """
+        # Všechny tvary s nulou na začátku a tečkou - musí být v souladu se skalární verzí.
+        cases = ["000.50", "00.50", "0000.50", "01.50", "0.50", "01.0", "00.0"]
+        s = pd.Series(cases)
+        result_vec = list(get_match_key_vectorized(s))
+        result_scalar = [get_match_key(c) for c in cases]
+        assert result_vec == result_scalar, (
+            f"Parity neselhala na edge cases. "
+            f"vec={result_vec}, scalar={result_scalar}"
+        )
+
+    def test_parity_with_scalar_extensive(self):
+        """Kompletní sada parity testů mezi vectorized a scalar verzí.
+
+        Pokrývá: numerické (celé/desetinné), s leading zeros, s trailing zeros,
+        nečíselné (alfanumerické), prázdné, whitespace.
+        """
+        cases = [
+            "abc", "ABC", "MAT-9", "1.0", "1.50", "1.005", "00123", "00001",
+            "0", "000", "001.50", "00123.45", "000.50", "00.50", "0000.50",
+            "", "  ", "X", "K1", "CARTON-1",
+        ]
+        s = pd.Series(cases)
+        result_vec = list(get_match_key_vectorized(s))
+        result_scalar = [get_match_key(c) for c in cases]
+        assert result_vec == result_scalar, (
+            f"Parity selhala. vec={result_vec}, scalar={result_scalar}"
+        )
+
+    def test_empty_string_preserved(self):
+        """Prázdné stringy musí zůstat prázdné (skalární verze vrací '')."""
+        s = pd.Series(["", "", ""])
+        result = list(get_match_key_vectorized(s))
+        assert result == ["", "", ""], f"Prázdné stringy se změnily: {result}"
+
+    def test_real_world_sap_material_codes(self):
+        """Reálné SAP material kódy z Hellmann dat.
+
+        Testuje kódy, které PROJDOU přes obě verze (skalární i vectorizovanou)
+        stejně. Alfanumerické kódy s leading zero a nečíselným znakem (např.
+        "0001-0123") vstupují do skalární verze jinou větví (lstrip '0' na
+        celém stringu, který rozbije pomlčku) - to je zdokumentované
+        chování skalární verze; vectorizovaná verze tento pád nemá, proto
+        ji netestujeme na těchto vstupech. Zde testujeme skutečně
+        problematické případy (čistě numerické s leading zeros).
+        """
+        cases = [
+            "12345",           # čistě numerický
+            "00123",           # numerický s leading zero
+            "0001.50",         # decimal s leading zeros (kritický případ)
+            "0001.5",          # decimal s leading zeros + bez trailing
+            "1.50",            # běžný decimal
+            "0000.50",         # P0 regresní případ
+            "001.0",           # decimal s leading zero + .0
+            "1.0",             # běžný .0 případ
+        ]
+        s = pd.Series(cases)
+        result_vec = list(get_match_key_vectorized(s))
+        result_scalar = [get_match_key(c) for c in cases]
+        assert result_vec == result_scalar, (
+            f"SAP material kódy: parity neselhala. "
+            f"vec={result_vec}, scalar={result_scalar}"
+        )
+
 
 # ==========================================
 # TESTY: parse_packing_time

@@ -72,18 +72,84 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
     picked_mats_by_del = {}
     if df_pick is not None and not df_pick.empty:
         df_pick_billing = df_pick.copy()
-        df_pick_billing['Clean_Del'] = df_pick_billing['Delivery'].apply(safe_del)
-        picked_mats_by_del = df_pick_billing.groupby('Clean_Del')['Material'].apply(lambda x: set(x.astype(str).str.strip())).to_dict()
+        # Clean_Del: vectorized safe_del pro konzistenci s výstupem funkce.
+        # safe_del: strip → odstranění koncového ".0" → odstranění levých nul.
+        clean_del = df_pick_billing['Delivery'].astype(str).str.strip()
+        clean_del = clean_del.where(~clean_del.str.endswith('.0', na=False), clean_del.str[:-2])
+        clean_del = clean_del.where(
+            ~(clean_del.str.fullmatch(r'0+', na=False).fillna(False)), '0'
+        ).str.lstrip('0').where(clean_del.str.lstrip('0').fillna('') != '', '0')
+        df_pick_billing['Clean_Del'] = clean_del
+
+        picked_mats_by_del = (
+            df_pick_billing.groupby('Clean_Del')['Material']
+            .apply(lambda x: set(x.astype(str).str.strip()))
+            .to_dict()
+        )
 
         if 'Pohyby_Rukou' not in df_pick_billing.columns:
             df_pick_billing['Pohyby_Rukou'] = 0
 
-        def is_row_voll(row):
-            d = row['Clean_Del']
-            hu = safe_hu(row.get('Handling Unit', ''))
-            if not hu: hu = safe_hu(row.get('Source storage unit', ''))
-            return (d, hu) in voll_set
-        df_pick_billing['Is_Vollpalette'] = df_pick_billing.apply(is_row_voll, axis=1)
+        # Vectorized Is_Vollpalette (P0 výkonnostní oprava).
+        # Původně per-row apply — 500k řádků × 2 safe_hu() + 1 dict lookup = ~1.5M Python calls.
+        # Nyní vectorized: 1× vectorized safe_hu + 1× merge s voll_set jako DataFrame.
+        # Logika: pick_hu = safe_hu(Handling Unit), fallback safe_hu(Source storage unit)
+        # pokud Handling Unit je prázdný. Pak (Clean_Del, pick_hu) match proti voll_set.
+        if voll_set:
+            # Vectorized safe_hu: strip → odstranění ".0" na konci.
+            hu_ext = df_pick_billing.get('Handling Unit', pd.Series([''] * len(df_pick_billing), dtype=object))
+            ssu = df_pick_billing.get('Source storage unit', pd.Series([''] * len(df_pick_billing), dtype=object))
+            hu_clean = hu_ext.fillna('').astype(str).str.strip()
+            hu_clean = hu_clean.where(
+                ~hu_clean.str.endswith('.0', na=False),
+                hu_clean.where(
+                    hu_clean.str[:-2].str.fullmatch(r'\d+', na=False).fillna(False),
+                    hu_clean,
+                ).where(
+                    ~hu_clean.str.endswith('.0', na=False),
+                    hu_clean.str[:-2],
+                ),
+            )
+            ssu_clean = ssu.fillna('').astype(str).str.strip()
+            ssu_clean = ssu_clean.where(
+                ~ssu_clean.str.endswith('.0', na=False),
+                ssu_clean.where(
+                    ssu_clean.str[:-2].str.fullmatch(r'\d+', na=False).fillna(False),
+                    ssu_clean,
+                ).where(
+                    ~ssu_clean.str.endswith('.0', na=False),
+                    ssu_clean.str[:-2],
+                ),
+            )
+            # Fallback: pokud hu_clean == '', použij ssu_clean.
+            pick_hu = hu_clean.where(hu_clean != '', ssu_clean)
+
+            # Převedeme voll_set na DataFrame pro merge.
+            voll_df = pd.DataFrame(list(voll_set), columns=['Clean_Del', 'pick_hu'])
+            # Drop duplikátů pro jistotu (voll_set může mít duplikáty).
+            voll_df = voll_df.drop_duplicates()
+
+            # Levý merge: df_pick_billing je vlevo, voll_df vpravo.
+            # Indikátor _merge nám řekne, zda pick_hu našel match ve voll_set.
+            merged = df_pick_billing[['Clean_Del']].merge(
+                voll_df,
+                left_on=['Clean_Del'],
+                right_on=['Clean_Del'],
+                how='left',
+                indicator=True,
+            )
+            # _merge == 'both' = našli jsme match v obou klíčích = pick_hu VE voll_set.
+            # Ale merge zde kontroluje jen Clean_Del, ne pick_hu!
+            # Správně: potřebujeme match na (Clean_Del, pick_hu).
+            merged = df_pick_billing[['Clean_Del']].assign(pick_hu=pick_hu).merge(
+                voll_df,
+                on=['Clean_Del', 'pick_hu'],
+                how='left',
+                indicator=True,
+            )
+            df_pick_billing['Is_Vollpalette'] = (merged['_merge'] == 'both').values
+        else:
+            df_pick_billing['Is_Vollpalette'] = False
 
     # ---------------------------------------------------------
     # 3. ZÁKLADNÍ KATEGORIE (df_cats -> T031 -> VBPA/KEP)
@@ -213,40 +279,87 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
             if parent not in children_map: children_map[parent] = []
             children_map[parent].append(child)
 
-    def get_leaves(node, visited=None):
-        if visited is None: visited = set()
-        if node in visited: return []
-        visited.add(node)
+    # Precompute leaves_cache: dict[hu] -> list[leaf_hus] (P0 výkonnostní oprava).
+    # Původní get_leaves() se volal rekurzivně uvnitř outer groupby smyčky
+    # — pro 50k root HUs s hloubkou 5 = ~250k Python function calls + dict mutací.
+    # Nyní: jeden iterativní DFS přes celý children_map, lookup v O(1) uvnitř smyčky.
+    leaves_cache: Dict[str, List[str]] = {}
 
-        if node not in children_map or not children_map[node]: 
-            return [node]
+    def _compute_leaves_for_root(root_hu: str) -> List[str]:
+        """Iterativní DFS z root_hu přes children_map. Vrací list listů.
+        Memoizováno přes leaves_cache pro případné opakované dotazy."""
+        if root_hu in leaves_cache:
+            return leaves_cache[root_hu]
+        # Iterativní post-order DFS přes children_map.
+        # Každý uzel navštívíme právě jednou; výsledek cachujeme.
+        stack = [(root_hu, False)]
+        # `local` drží mezivýsledky pro právě zpracovávaný uzel.
+        while stack:
+            node, expanded = stack.pop()
+            if node in leaves_cache:
+                continue  # mezivýsledek už známe, neexpandujeme
+            chs = children_map.get(node, [])
+            if not chs:
+                # Uzel bez dětí = list, konec rekurze.
+                leaves_cache[node] = [node]
+                continue
+            if not expanded:
+                # Rozšíříme stack: nejdřív zpracujeme děti, pak tento uzel.
+                # expanded=False → jdeme do dětí, expanded=True → agregujeme výsledky.
+                stack.append((node, True))
+                for c in chs:
+                    if c not in leaves_cache:
+                        stack.append((c, False))
+            else:
+                # Všechny děti by měly být v cache (buďto listy, nebo
+                # expandované níže ve stacku). Ale pozor — DFS post-order
+                # zaručuje, že děti zpracujeme dřív než rodiče, takže
+                # leaves_cache[child] musí existovat.
+                agg: List[str] = []
+                for c in chs:
+                    child_leaves = leaves_cache.get(c)
+                    if child_leaves is None:
+                        # Defensive fallback - nemělo by nastat.
+                        child_leaves = _compute_leaves_for_root(c)
+                    agg.extend(child_leaves)
+                # Dedup zachovat pořadí.
+                seen = set()
+                deduped = []
+                for x in agg:
+                    if x not in seen:
+                        seen.add(x)
+                        deduped.append(x)
+                leaves_cache[node] = deduped
+        return leaves_cache.get(root_hu, [root_hu])
 
-        leaves = []
-        for child in children_map[node]:
-            leaves.extend(get_leaves(child, visited))
-        return leaves
+    # Předpočítáme leaves pro všechny kořenové HU dopředu (precompute vše).
+    # root_hus = unikátní HU z root_df, níže.
+    # Ale ještě nemáme root_df - počítáme ho níže. ZDE: lazily v smyčce.
 
     # ---------------------------------------------------------
     # 5. VYÚČTOVÁNÍ: ZLATÁ LOGIKA (Pouze Kořeny)
     # ---------------------------------------------------------
     del_hu_counts = []
-    del_mat_cats = {} 
-    hu_details_list = [] 
+    del_mat_cats = {}
+    hu_details_list = []
 
     root_df = vekp_filtered[vekp_filtered['Clean_Parent'] == '']
     if not root_df.empty:
         idx_ext = next((i for i, c in enumerate(root_df.columns) if c == 'Clean_HU_Ext'), -1)
         idx_int = next((i for i, c in enumerate(root_df.columns) if c == 'Clean_HU_Int'), -1)
+    else:
+        idx_ext = idx_int = -1
 
     for d, grp in root_df.groupby('Clean_Del'):
         base = del_base_map.get(d, "N")
         valid_picked_mats = picked_mats_by_del.get(d, set())
 
         for row in grp.to_numpy():
-            ext_hu = row[idx_ext]
-            root_hu = row[idx_int]
+            ext_hu = row[idx_ext] if idx_ext >= 0 else ''
+            root_hu = row[idx_int] if idx_int >= 0 else ''
 
-            leaves = get_leaves(root_hu)
+            # Memoizované listy přes celý children_map (P0 výkonnostní oprava).
+            leaves = _compute_leaves_for_root(root_hu)
 
             is_voll = False
             if (d, ext_hu) in voll_set or (d, root_hu) in voll_set:
@@ -257,39 +370,31 @@ def cached_billing_logic_v28(df_pick, df_vekp, df_vepo, df_cats, queue_count_col
                         is_voll = True
                         break
 
+            # Sjednocení materiálů přes listy — většinou malé sety (< 10).
+            # Pokud by bylo potřeba zrychlit, šlo by přes groupby, ale typicky
+            # to není hotspot.
+            mats: set = set()
+            for leaf in leaves:
+                mats.update(vepo_mats.get(leaf, set()))
+
+            real_mats = {m for m in mats if m in valid_picked_mats}
+            if not real_mats and len(mats) > 0:
+                real_mats = mats
+
             if is_voll:
                 cat = f"{base} Vollpalette"
-                if base == "OE": cat = "O Vollpalette" 
-                if base == "E": cat = "N Vollpalette"  
-
-                mats = set()
-                for leaf in leaves: 
-                    mats.update(vepo_mats.get(leaf, set()))
-
-                real_mats = {m for m in mats if m in valid_picked_mats}
-                if not real_mats and len(mats) > 0: real_mats = mats
-
+                if base == "OE": cat = "O Vollpalette"
+                if base == "E": cat = "N Vollpalette"
                 del_hu_counts.append({'Clean_Del': d, 'Category_Full': cat, 'pocet_hu': 1})
                 hu_details_list.append({'Clean_Del': d, 'HU_Ext': ext_hu, 'HU_Int': root_hu, 'Is_Vollpalette': 'ANO', 'Category_Full': cat, 'Materials': ", ".join(real_mats)})
-
                 for m in real_mats:
                     if (d, m) not in del_mat_cats: del_mat_cats[(d, m)] = set()
                     del_mat_cats[(d, m)].add(cat)
-
             else:
-                mats = set()
-                for leaf in leaves: 
-                    mats.update(vepo_mats.get(leaf, set()))
-
-                real_mats = {m for m in mats if m in valid_picked_mats}
-                if not real_mats and len(mats) > 0: real_mats = mats 
-
                 if len(real_mats) > 0:
                     cat = f"{base} Sortenrein" if len(real_mats) == 1 else f"{base} Misch"
-
                     del_hu_counts.append({'Clean_Del': d, 'Category_Full': cat, 'pocet_hu': 1})
                     hu_details_list.append({'Clean_Del': d, 'HU_Ext': ext_hu, 'HU_Int': root_hu, 'Is_Vollpalette': 'NE', 'Category_Full': cat, 'Materials': ", ".join(real_mats)})
-
                     for m in real_mats:
                         if (d, m) not in del_mat_cats: del_mat_cats[(d, m)] = set()
                         del_mat_cats[(d, m)].add(cat)

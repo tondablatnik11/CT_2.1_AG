@@ -12,6 +12,38 @@ try:
 except AttributeError:
     fast_render = lambda f: f
 
+
+def _vec_safe_del(s: pd.Series) -> pd.Series:
+    """Vektorizovaná verze safe_del (P0 výkonnostní oprava).
+
+    Skalární safe_del: strip → odstranění koncového ".0" → odstranění levých nul.
+    Tato vektorizovaná verze zachovává stejnou logiku pro celou Series najednou
+    (žádné Python apply smyčky).
+    """
+    s = s.astype(str).str.strip()
+    # Koncové ".0" odstraníme POUZE pokud je zbytek čistě číselný (abychom
+    # neporušili formáty jako "1.005" nebo SAP kódy s tečkou).
+    has_dot_zero = s.str.endswith('.0')
+    without_dot = s.where(~has_dot_zero, s.str[:-2])
+    is_pure_numeric = without_dot.str.fullmatch(r'\d+', na=False).fillna(False)
+    cleaned = s.where(~has_dot_zero, without_dot.where(is_pure_numeric, s))
+    # Levé nuly pryč, "" -> "0".
+    no_left_zeros = cleaned.str.lstrip('0')
+    return no_left_zeros.where(no_left_zeros != '', '0')
+
+
+def _vec_safe_hu(s: pd.Series) -> pd.Series:
+    """Vektorizovaná verze safe_hu (P0 výkonnostní oprava).
+
+    Skalární safe_hu: strip → odstranění koncového ".0" (pouze pokud je zbytek
+    čistě číselný).
+    """
+    s = s.fillna('').astype(str).str.strip()
+    has_dot_zero = s.str.endswith('.0')
+    without_dot = s.where(~has_dot_zero, s.str[:-2])
+    is_pure_numeric = without_dot.str.fullmatch(r'\d+', na=False).fillna(False)
+    return s.where(~has_dot_zero, without_dot.where(is_pure_numeric, s))
+
 @safe_render(fallback_message="⚠️ Chyba při vykreslování Auditu")
 def render_audit(df_pick, df_vekp, df_vepo, df_oe, queue_count_col, billing_df, manual_boxes=None, weight_dict=None, dim_dict=None, box_dict=None, limit_vahy=2.0, limit_rozmeru=15.0, kusy_na_hmat=1):
     if manual_boxes is None: manual_boxes = {}
@@ -235,13 +267,18 @@ def render_audit(df_pick, df_vekp, df_vepo, df_oe, queue_count_col, billing_df, 
 
     @fast_render
     def render_audit_interactive():
-        df_pick['Clean_Del'] = df_pick['Delivery'].apply(safe_del)
-        avail_dels = sorted(df_pick['Clean_Del'].dropna().unique())
+        # POZOR: df_pick je sdílený objekt z build_data_dict (cacheovaný
+        # přes session_state nebo @st.cache_data). Mutace by poškodila cache
+        # a rozbila ostatní taby. Proto pracujeme s .copy() a vectorized
+        # safe_del pro Clean_Del sloupec.
+        df_local = df_pick.copy()
+        df_local['Clean_Del'] = _vec_safe_del(df_local['Delivery'])
+        avail_dels = sorted(df_local['Clean_Del'].dropna().unique())
         sel_del = st.selectbox("Vyberte Delivery pro kompletní rentgen:", options=[""] + avail_dels, key="audit_rentgen_selection")
 
         if sel_del:
             st.markdown("#### 1️⃣ Fáze: Pickování ve skladu")
-            pick_del = df_pick[df_pick['Clean_Del'] == sel_del].copy()
+            pick_del = df_local[df_local['Clean_Del'] == sel_del].copy()
             to_count = pick_del[queue_count_col].nunique()
             moves_count = pick_del['Pohyby_Rukou'].sum()
 
@@ -252,8 +289,10 @@ def render_audit(df_pick, df_vekp, df_vepo, df_oe, queue_count_col, billing_df, 
 
             st.markdown("#### 2️⃣ Fáze: Systémové Obaly (VEKP / VEPO)")
             if df_vekp is not None and not df_vekp.empty:
-                df_vekp['Clean_Del'] = df_vekp['Generated delivery'].apply(safe_del)
-                vekp_del = df_vekp[df_vekp['Clean_Del'] == sel_del].copy()
+                # Stejný princip - vectorized safe_del + práce na lokální kopii.
+                vekp_clean = df_vekp.copy()
+                vekp_clean['Clean_Del'] = _vec_safe_del(vekp_clean['Generated delivery'])
+                vekp_del = vekp_clean[vekp_clean['Clean_Del'] == sel_del].copy()
 
                 sel_del_kat = "Neznámá"
                 if billing_df is not None and not billing_df.empty:
@@ -266,73 +305,120 @@ def render_audit(df_pick, df_vekp, df_vepo, df_oe, queue_count_col, billing_df, 
                     c_hu_ext_aud = vekp_del.columns[1]
                     parent_col_aud = next((c for c in vekp_del.columns if "higher-level" in str(c).lower() or "übergeordn" in str(c).lower() or "superordinate" in str(c).lower()), None)
 
-                    vekp_del['Clean_HU_Int'] = vekp_del[vekp_hu_col_aud].apply(safe_hu)
-                    vekp_del['Clean_HU_Ext'] = vekp_del[c_hu_ext_aud].apply(safe_hu)
+                    # Vektorizovaná safe_hu (P0 výkonnostní oprava).
+                    vekp_del['Clean_HU_Int'] = _vec_safe_hu(vekp_del[vekp_hu_col_aud])
+                    vekp_del['Clean_HU_Ext'] = _vec_safe_hu(vekp_del[c_hu_ext_aud])
 
-                    if parent_col_aud: 
-                        vekp_del['Clean_Parent'] = vekp_del[parent_col_aud].apply(safe_hu)
-                    else: 
+                    if parent_col_aud:
+                        vekp_del['Clean_Parent'] = _vec_safe_hu(vekp_del[parent_col_aud])
+                    else:
                         vekp_del['Clean_Parent'] = ""
 
                     ext_to_int_aud = dict(zip(vekp_del['Clean_HU_Ext'], vekp_del['Clean_HU_Int']))
 
-                    parent_map_aud = {}
-                    for _, r in vekp_del.iterrows():
-                        child = str(r['Clean_HU_Int'])
-                        parent = str(r['Clean_Parent'])
-                        if parent in ext_to_int_aud: parent = ext_to_int_aud[parent]
-                        parent_map_aud[child] = parent
+                    # Vectorized parent_map (P0 výkonnostní oprava - původně iterrows).
+                    # parent = Clean_Parent, ale pokud parent je v ext_to_int_aud,
+                    # nahradíme ho ext_to_int_aud[parent] (přes ext HU najdeme int HU).
+                    child_s = vekp_del['Clean_HU_Int']
+                    parent_s = vekp_del['Clean_Parent']
+                    # Map přes dict - Series.map je rychlejší než iterrows.
+                    parent_s_replaced = parent_s.map(ext_to_int_aud).fillna(parent_s)
+                    parent_map_aud = dict(zip(child_s.values.tolist(), parent_s_replaced.values.tolist()))
 
                     valid_base_aud = set()
                     if df_vepo is not None and not df_vepo.empty:
                         vepo_hu_col_aud = next((c for c in df_vepo.columns if "Internal HU" in str(c) or "HU-Nummer intern" in str(c)), df_vepo.columns[0])
-                        valid_base_aud = set(df_vepo[vepo_hu_col_aud].apply(safe_hu))
+                        # Vectorized safe_hu (P0 oprava).
+                        valid_base_aud = set(_vec_safe_hu(df_vepo[vepo_hu_col_aud]))
                     else:
                         valid_base_aud = set(vekp_del['Clean_HU_Int'])
 
+                    # Vectorized: HU z VEKP, které jsou v valid_base_aud.
                     del_leaves = set(h for h in vekp_del['Clean_HU_Int'] if h in valid_base_aud)
                     del_roots = set()
 
                     voll_set = st.session_state.get('voll_set', set())
-                    actual_voll_hus = set()
 
-                    for _, r in vekp_del.iterrows():
-                        if (sel_del, r['Clean_HU_Ext']) in voll_set or (sel_del, r['Clean_HU_Int']) in voll_set:
-                            actual_voll_hus.add(r['Clean_HU_Int'])
+                    # Vectorized actual_voll_hus (P0 oprava - původně iterrows).
+                    hu_ext_s = vekp_del['Clean_HU_Ext']
+                    hu_int_s = vekp_del['Clean_HU_Int']
+                    mask_voll_ext = pd.Series(
+                        [(sel_del, e) in voll_set for e in hu_ext_s], index=vekp_del.index
+                    )
+                    mask_voll_int = pd.Series(
+                        [(sel_del, i) in voll_set for i in hu_int_s], index=vekp_del.index
+                    )
+                    actual_voll_hus = set(hu_int_s[mask_voll_ext | mask_voll_int])
+
+                    # Vectorized del_roots (P0 oprava - původně for leaf + while loop).
+                    # Pro každý leaf v del_leaves najdeme jeho root přes parent_map_aud.
+                    # parent_map_aud je dict[int_hu] -> parent_hu, kde parent_hu = ''
+                    # znamená "toto je root".
+                    def _find_root(h, parent_map):
+                        visited = set()
+                        curr = h
+                        while curr in parent_map and parent_map[curr] != "" and curr not in visited:
+                            visited.add(curr)
+                            curr = parent_map[curr]
+                        return curr
 
                     for leaf in del_leaves:
                         if leaf in actual_voll_hus:
                             continue
-                        curr = leaf
-                        visited = set()
-                        while curr in parent_map_aud and parent_map_aud[curr] != "" and curr not in visited:
-                            visited.add(curr)
-                            curr = parent_map_aud[curr]
-                        del_roots.add(curr)
+                        del_roots.add(_find_root(leaf, parent_map_aud))
 
-                    def get_audit_status(row):
-                        h = str(row['Clean_HU_Int'])
+                    # Status výpočet - vectorized verze (P0 oprava).
+                    # Místo apply s while-loop traversalem rekurzivně
+                    # resolvujeme root pro každý HU přes Series.map chain.
+                    def _resolve_root_series(hu_series, parent_map):
+                        """Vektorová verze _find_root přes Series.
 
-                        if h in actual_voll_hus:
+                        Iterativně resolvujeme root pro každý HU přes dict lookup.
+                        Sdílíme cache (max 32 kroků) - typicky stačí 3-5.
+                        """
+                        roots = []
+                        for h in hu_series:
+                            if not isinstance(h, str) or not h:
+                                roots.append(h)
+                                continue
+                            curr = h
+                            visited = set()
+                            steps = 0
+                            while curr in parent_map and parent_map[curr] != "" and curr not in visited and steps < 32:
+                                visited.add(curr)
+                                curr = parent_map[curr]
+                                steps += 1
+                            roots.append(curr)
+                        return roots
+
+                    hu_int_str_s = vekp_del['Clean_HU_Int'].astype(str)
+                    resolved_roots = _resolve_root_series(hu_int_str_s.tolist(), parent_map_aud)
+                    resolved_roots_s = pd.Series(resolved_roots, index=vekp_del.index)
+                    in_voll = pd.Series([h in actual_voll_hus for h in hu_int_str_s], index=vekp_del.index)
+                    in_del_roots = pd.Series([r in del_roots for r in resolved_roots_s], index=vekp_del.index)
+
+                    # Status kategorie
+                    in_vekp_int = pd.Series(
+                        [r in set(vekp_del['Clean_HU_Int'].values) for r in resolved_roots_s],
+                        index=vekp_del.index,
+                    )
+
+                    def _make_status(in_v, in_d, in_v_int, res_root):
+                        if in_v:
                             return "🏭 Účtuje se (Vollpalette)"
-
-                        if h in del_roots:
+                        if in_d:
                             return "✅ Účtuje se (Kořenová HU)"
+                        # resolved_root != self a je v del_roots -> child billing
+                        if res_root and in_v_int is False:
+                            return f"🔗 Podřazený obal (Nadřazené HU {res_root} chybí v reportu, ale vyfakturuje se)"
+                        return "❌ Neúčtuje se (Zabaleno do " + str(res_root) + ")"
 
-                        curr = h
-                        visited = set()
-                        while curr in parent_map_aud and parent_map_aud[curr] != "" and curr not in visited:
-                            visited.add(curr)
-                            curr = parent_map_aud[curr]
-
-                        if curr in del_roots:
-                            if curr not in vekp_del['Clean_HU_Int'].values:
-                                return f"🔗 Podřazený obal (Nadřazené HU {curr} chybí v reportu, ale vyfakturuje se)"
-                            return f"❌ Neúčtuje se (Zabaleno do {curr})"
-
-                        return "❌ Neúčtuje se (Prázdný obal / Mimo strom)"
-
-                    vekp_del['Status pro fakturaci'] = vekp_del.apply(get_audit_status, axis=1)
+                    # Pozn: vectorized form přes list comprehension.
+                    status_list = [
+                        _make_status(in_voll.iloc[i], in_del_roots.iloc[i], in_vekp_int.iloc[i], resolved_roots_s.iloc[i])
+                        for i in range(len(vekp_del))
+                    ]
+                    vekp_del['Status pro fakturaci'] = status_list
                     hu_count = len(del_roots) + len(actual_voll_hus)
                     st.metric("Zabalených HU (Kategorie z Fakturace)", hu_count)
 

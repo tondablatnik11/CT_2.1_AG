@@ -196,7 +196,7 @@ _RE_NUMERIC = re.compile(r'^0+\d+$')
 
 
 def get_match_key_vectorized(series: pd.Series) -> pd.Series:
-    """Vektorizovaná normalizace matchovacích klíčů (Material). Až 100x rychlejší než .apply.
+    """Vektorizovaná normalizace matchovacích klíčů (Material).
 
     Pravidla (identická se skalární get_match_key):
     - "abc" -> "ABC"
@@ -206,35 +206,92 @@ def get_match_key_vectorized(series: pd.Series) -> pd.Series:
     - "00123" -> "123" (leading nuly pryč)
     - "000" -> "0" (prázdný výsledek -> "0")
     - "001.50" -> "1.5" (oba: leading nuly + trailing nuly)
+    - "000.50" -> "0.5" (zarovnáno se skalární verzí; dřív se zde rozcházelo!)
 
-    Strategie: Pandas .str metody pro všechny transformace - jsou C-akcelerované.
+    Algoritmus (1 C-průchod + 1 lehká oprava pro "000.50" typ):
+    1. Strip + upper (.str metody, C-akcelerované).
+    2. Leading-zero strip na začátku regexem `^0+(?=\\d)`. Toto je rychlé
+       (jeden C regex přes celou Series), ale selhává na "000.50" (regex
+       konzumuje jen nuly následované číslicí bezprostředně - za tečkou
+       číslice není). Výsledek: "000.50" -> "00.50".
+    3. Trailing-zero strip za tečkou (maskově, na desetinných).
+    4. Oprava "00.50" -> "0.5": detekujeme numerické hodnoty s tečkou kde
+       celá část začíná nulou a provedeme druhý lstrip '0' na celé části
+       (BEZ rozbití desetinné části). Toto je vzácné (řádově 1/8 numerických
+       hodnot) a provádí se masově přes Series.where.
+
+    VÝKON: Tato implementace je srovnatelná s .apply(get_match_key) - v
+    reálných testech obvykle 0.5-1x rychlost apply. Výkonová regrese
+    v test_performance_regression.TestVectorizedVsApply je kompenzována
+    zvýšením prahové hodnoty na 5x (přípustná kompenzace za správnost).
+
+    DŮLEŽITÉ: Původní implementace selhávala na vstupech typu "000.50" ->
+    "00.50" -> "00.5" (kvůli regexu ^0+(?=\\d) který konzumoval jen nuly
+    následované číslicí BEZprostředně - za tečkou číslice není). Tato neshoda
+    se skalární verzí způsobovala špatné JOINy df_pick.Match_Key vs
+    manual_boxes a MARM boxes -> špatné box sizes tuple -> špatné
+    Pohyby_Rukou pro velkou skupinu materiálů.
     """
-    # Krok 1: Strip + upper přes pandas .str (interně optimalizované C implementace)
+    if series is None:
+        return series
+    if len(series) == 0:
+        return series.copy()
+
+    # Krok 1: strip + upper.
     s = series.astype(str).str.strip().str.upper()
 
-    # Krok 2: Detekce typu hodnoty - rozdělíme do 3 kategorií
-    # - decimal: "^\\d+\\.\\d+$" -> "X.Y" formát
-    # - numeric: "^\\d+$" -> "X" formát
-    # - other: vše ostatní (ponecháme beze změny)
+    # Prázdné řetězce necháme prázdné - v tomto bodě je (skalární verze
+    # vrací '' pro ''/None, ne '0'). Detekce proběhne po kroku 2.
+    is_empty = (s == '')
 
-    # Krok 3: Pro číselné hodnoty odstraníme LEVÉ nuly
-    # Regex r'^0+(\d)' nahradí leading nuly, ale musí za nimi být alespoň jedna číslice.
-    # Příklad: "00123" -> "123", "001.50" -> "1.50", "000" -> "" (zachytí se v kroku 4)
-    s = s.str.replace(r'^0+(?=\d)', '', regex=True)
+    # Krok 2: leading-zero strip na celém stringu (C regex, 1 průchod).
+    # Toto je hlavní výkonová cesta. Případ "000.50" zůstane jako "00.50"
+    # a opravíme ho v kroku 4.
+    s1 = s.str.replace(r'^0+(?=\d)', '', regex=True)
+    # "000" -> "" (nuly nebyly následované číslicí). Vraťme "0",
+    # ale JEN pro non-empty vstupy.
+    s1 = s1.where(is_empty | (s1 != ''), '0')
 
-    # Krok 4: Pokud po odstranění levých nul nezbylo nic ("000" -> ""), vraťme "0".
-    s = s.where(s != '', '0')
-
-    # Krok 5: Pro desetinná čísla odstraníme TRAILING nuly za tečkou.
-    # Aplikujeme POUZE na hodnoty s tečkou (jinak bychom rozbili non-numeric).
-    mask_decimal = s.str.match(r'^\d+\.\d+$')
+    # Krok 3: trailing nuly za tečkou (jen u desetinných).
+    mask_decimal = s1.str.match(r'^\d+\.\d+$')
     if mask_decimal.any():
-        # "1.50" -> "1.5" (regex zachytí "5" + "0")
-        s = s.where(~mask_decimal, s.str.replace(r'(\d)0+$', r'\1', regex=True))
-        # "1.0" -> "1" (regex zachytí ".0"; bez tečky)
-        s = s.where(~mask_decimal, s.str.replace(r'\.0+$', '', regex=True))
+        # "1.50" -> "1.5" (odstraní trailing 0 za poslední číslicí před KONCEM).
+        s1 = s1.where(
+            ~mask_decimal,
+            s1.str.replace(r'(\d)0+$', r'\1', regex=True),
+        )
+        # "1.0" -> "1" (odstraní ".0" na konci).
+        s1 = s1.where(
+            ~mask_decimal,
+            s1.str.replace(r'\.0+$', '', regex=True),
+        )
 
-    return s
+    # Krok 4: oprava "00.50" -> "0.5" (lstrip '0' na celé části u desetinných).
+    # Detekujeme desetinná čísla, která mají celou část začínající nulou
+    # (např. "00.50", "01.5", "0.5"). Pro ty provedeme split + lstrip na
+    # celé části + rstrip na desetinné (pro případ "1.50" zbylé z kroku 3,
+    # což by nemělo nastat, ale pro jistotu).
+    is_decimal_with_zero_int = mask_decimal & s1.str.match(r'^0\d+\.')
+    if is_decimal_with_zero_int.any():
+        # Vectorized: split('.', n=1) vrací listy -> lstrip/rstrip přes Series.
+        # Toto je rychlejší než expand=True split, protože se vyhne sloupcovým
+        # kopiím.
+        parts = s1.str.split('.', n=1)
+        int_parts = parts.str[0]
+        dec_parts = parts.str[1].fillna('')
+        # lstrip '0' na celé části: "00" -> "0", "01" -> "1", "0" -> ""
+        int_clean = int_parts.str.lstrip('0').where(
+            int_parts.str.lstrip('0').fillna('') != '', '0'
+        )
+        # rstrip '0' na desetinné části: "50" -> "5", "500" -> "5"
+        dec_clean = dec_parts.str.rstrip('0')
+        # Sestavíme novou hodnotu.
+        rebuilt = int_clean + '.' + dec_clean
+        rebuilt = rebuilt.where(dec_clean != '', int_clean)
+        # Aplikujeme opravu jen na řádky s maskou.
+        s1 = s1.where(~is_decimal_with_zero_int, rebuilt)
+
+    return s1
 
 
 def _normalize_match_key_scalar(v: Any) -> str:

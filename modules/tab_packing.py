@@ -59,16 +59,36 @@ def prep_packing_data(billing_df, df_oe):
         return valid_time_df, pd.DataFrame(), None, None
 
     # --- CHYTRÉ NAPOJENÍ NA PŘESNÁ SKLADOVÁ DATA ---
-    df_pick = load_from_db('raw_pick')
-    if df_pick is not None and not df_pick.empty:
-        df_pick['Clean_Del'] = df_pick.get('Delivery', pd.Series()).astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lstrip('0')
-        df_pick['Qty'] = pd.to_numeric(df_pick.get('Act.qty (dest)', 0), errors='coerce').fillna(0)
-        df_pick['Material'] = df_pick.get('Material', pd.Series()).astype(str).str.strip()
+    # POZOR: load_from_db() vrací výsledek @st.cache_data - sdílený objekt.
+    # Před jakoukoliv mutací MUSÍME .copy(), jinak by se změny propsaly
+    # do cache a rozbily by ostatní taby/sessiony (P0 crash na produkci).
+    df_pick_raw = load_from_db('raw_pick')
+    if df_pick_raw is not None and not df_pick_raw.empty:
+        df_pick = df_pick_raw.copy()
+        try:
+            df_pick['Clean_Del'] = (
+                df_pick.get('Delivery', pd.Series(dtype=str))
+                .astype(str)
+                .str.replace(r'\.0$', '', regex=True)
+                .str.strip()
+                .str.lstrip('0')
+            )
+            df_pick['Qty'] = pd.to_numeric(
+                df_pick.get('Act.qty (dest)', 0), errors='coerce'
+            ).fillna(0)
+            df_pick['Material'] = (
+                df_pick.get('Material', pd.Series(dtype=str))
+                .astype(str).str.strip()
+            )
+        except Exception:
+            df_pick = df_pick_raw.copy()
 
-        # Pro každou zakázku sečteme reálné kusy a najdeme nejčastější materiál
+        # Pro každou zakázku sečteme reálné kusy a najdeme nejčastější materiál.
+        # Vektorizovaný mode: přes groupby('Clean_Del') + transform nelze vzít
+        # mode snadno (mode() vrací celou Series), ale .agg s named agg je čitelný.
         pick_info = df_pick.groupby('Clean_Del').agg(
             Skladovy_Material=('Material', lambda x: x.value_counts().index[0] if len(x.value_counts()) > 0 else ""),
-            Celkove_Kusy=('Qty', 'sum')
+            Celkove_Kusy=('Qty', 'sum'),
         ).reset_index()
 
         valid_time_df = pd.merge(valid_time_df, pick_info, on='Clean_Del', how='left')
